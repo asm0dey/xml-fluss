@@ -1,8 +1,10 @@
-/build/
+**/build/
 
 # KSP generated sources
-/build/generated/
+**/build/generated/
 
 # Kotlin compiled classes
 *.class
 /.kotlin/
+/xml-fluss-ksp/build/
+.gradle/

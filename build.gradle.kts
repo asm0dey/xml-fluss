@@ -4,6 +4,7 @@ import org.gradle.api.publish.maven.MavenPublication
 plugins {
     kotlin("jvm") version "2.3.21" apply false
     id("com.google.devtools.ksp") version "2.3.7" apply false
+    id("org.jetbrains.dokka") version "2.2.0" apply false
     `jacoco-report-aggregation`
     `maven-publish`
 }
@@ -20,6 +21,12 @@ allprojects {
 subprojects {
     apply(plugin = "jacoco")
     apply(plugin = "maven-publish")
+    apply(plugin = "org.jetbrains.dokka")
+
+    val dokkaJavadocJar by tasks.registering(Jar::class) {
+        archiveClassifier.set("javadoc")
+        from(tasks.named("dokkaJavadoc"))
+    }
 
     tasks.withType<Test> {
         extensions.configure<JacocoTaskExtension> {
@@ -32,6 +39,7 @@ subprojects {
             create<MavenPublication>("maven") {
                 afterEvaluate {
                     from(components["java"])
+                    artifact(dokkaJavadocJar)
                 }
             }
         }

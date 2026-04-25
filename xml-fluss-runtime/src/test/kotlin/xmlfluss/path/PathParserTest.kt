@@ -88,16 +88,16 @@ class PathParserTest {
     @Test fun attrLeaf_lastAccepted() {
         val cp = parse("//book/@id")
         assertNotNull(cp.attrLeaf)
-        assertEquals("id", cp.attrLeaf!!.name.local)
+        assertEquals("id", cp.attrLeaf.name.local)
         assertEquals(1, cp.elementSteps.count { it is Step.Named })
     }
 
     @Test fun attrLeaf_firstSegmentAccepted() {
         val cp = parse("@a")
         assertNotNull(cp.attrLeaf)
-        assertEquals("a", cp.attrLeaf!!.name.local)
+        assertEquals("a", cp.attrLeaf.name.local)
         // null ns for null-prefix attribute
-        assertNull(cp.attrLeaf!!.name.ns)
+        assertNull(cp.attrLeaf.name.ns)
     }
 
     @Test fun prefixQname_resolvedByNsResolver() {

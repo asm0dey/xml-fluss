@@ -1,7 +1,13 @@
 package xmlfluss.path
 
 /**
- * Streaming NFA matcher driven by [pushElement]/[popElement] events from the StAX cursor.
+ * Streaming NFA (Non-deterministic Finite Automaton) matcher driven by [pushElement]/[popElement] 
+ * events from the StAX cursor.
+ *
+ * An NFA is a state machine that can be in multiple states simultaneously. This implementation
+ * tracks which steps of the XPath expression have been satisfied as the XML document is traversed.
+ * Unlike a traditional NFA that processes a flat string, this matcher operates on a hierarchical
+ * XML structure, maintaining state at each nesting depth.
  *
  * The state at each depth is a [BooleanArray] of size `n + 1`, where `n` is the number of element
  * steps in the [CompiledPath]. Slot `i` is `true` when the input has consumed exactly the first

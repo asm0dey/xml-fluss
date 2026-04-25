@@ -37,6 +37,17 @@ import com.squareup.kotlinpoet.ksp.writeTo
 import java.time.LocalDate
 import javax.annotation.processing.Generated
 
+private const val XMLFLUSS_RUNTIME = "xmlfluss.runtime"
+private const val SKIP_CHILD = "c.skipChild()\n"
+private const val ELSE_SKIP_CHILD = "else -> $SKIP_CHILD"
+private const val KOTLIN_BOOLEAN = "kotlin.Boolean"
+private const val KOTLIN_DOUBLE = "kotlin.Double"
+private const val KOTLIN_LONG = "kotlin.Long"
+private const val KOTLIN_INT = "kotlin.Int"
+private const val KOTLIN_STRING = "kotlin.String"
+private const val KOTLIN_COLLECTIONS_MAP = "kotlin.collections.Map"
+private const val KOTLIN_COLLECTIONS_LIST = "kotlin.collections.List"
+
 /**
  * KSP processor that turns `@XmlRecord` data classes into streaming parsers.
  *
@@ -133,8 +144,8 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         val typeFq = typeRef.declaration.qualifiedName?.asString() ?: typeRef.toString()
         val nullable = typeRef.isMarkedNullable
 
-        val isList = typeFq == "kotlin.collections.List"
-        val isMap = typeFq == "kotlin.collections.Map"
+        val isList = typeFq == KOTLIN_COLLECTIONS_LIST
+        val isMap = typeFq == KOTLIN_COLLECTIONS_MAP
         if (isList && nullable) vError("List field '$name' must not be nullable; use empty list")
 
         val elemKsTypeEarly: KSType? = when {
@@ -157,7 +168,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
                 XML_ATTR_FQ -> {
                     vRequire(source == null) { "multiple xml bindings on '$name'" }
                     val raw = stringArg(a, "name").orEmpty()
-                    val n = if (raw.isEmpty()) name else raw
+                    val n = raw.ifEmpty { name }
                     val (ans, alocal) = resolveQName(
                         n,
                         nsMap,
@@ -175,7 +186,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
                     if (sealedPolyDecl != null) {
                         source = buildPolyChild(sealedPolyDecl, raw, name, nsMap, registry)
                     } else {
-                        val pathStr = if (raw.isEmpty()) name else raw
+                        val pathStr = raw.ifEmpty { name }
                         source = parseChildPath(pathStr, name, nsMap)
                     }
                 }
@@ -183,7 +194,9 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
                 XML_TEXT_FQ -> {
                     vRequire(source == null) { "multiple xml bindings on '$name'" }
                     if (isList) vError("@XmlText on List unsupported for '$name'")
-                    source = Source.Text(booleanArg(a, "preserveWhitespace") ?: false)
+                    source = Source.Text(
+                        a.arguments.firstOrNull { it.name?.asString() == "preserveWhitespace" }?.value as? Boolean
+                            ?: false)
                 }
 
                 XML_MAP_FQ -> {
@@ -251,8 +264,8 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             else -> vError("Unsupported type '$elemFq' for field '$name'. Use a scalar, supported temporal, BigDecimal, @XmlConverter, or a nested data class.")
         }
 
-        val typeName = typeNameFor(elemKsType, isList, elemNullable, listNullable = false)
-        val elemTypeName = typeNameFor(elemKsType, isList = false, elemNullable, listNullable = false)
+        val typeName = typeNameFor(elemKsType, isList, elemNullable)
+        val elemTypeName = typeNameFor(elemKsType, isList = false, elemNullable)
         return FieldSpec(
             name = name,
             typeName = typeName,
@@ -299,7 +312,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             isList = false,
             elemNullable = false,
             elemTypeName = valField.typeName,
-            elemTypeFq = "kotlin.collections.Map",
+            elemTypeFq = KOTLIN_COLLECTIONS_MAP,
             source = Source.MapEntry(entryNs, entryLocal),
             coerce = Coerce.MapAggregate,
             mapKeyField = keyField,
@@ -317,8 +330,8 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         kind: String,
     ): FieldSpec {
         val typeFq = type.declaration.qualifiedName?.asString() ?: type.toString()
-        vRequire(typeFq != "kotlin.collections.Map") { "@XmlMap '$kind' of '$owner': nested Map<,> not supported" }
-        val isList = typeFq == "kotlin.collections.List"
+        vRequire(typeFq != KOTLIN_COLLECTIONS_MAP) { "@XmlMap '$kind' of '$owner': nested Map<,> not supported" }
+        val isList = typeFq == KOTLIN_COLLECTIONS_LIST
         val nullable = if (isList) false else type.isMarkedNullable
         // List<E> always exposes a single type argument under KSP.
         val elemKsType: KSType = if (isList) type.arguments[0].type!!.resolve() else type
@@ -326,8 +339,8 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             "@XmlMap '$kind' of '$owner': nullable element inside List<…> not supported"
         }
         val elemFq = elemKsType.declaration.qualifiedName?.asString() ?: elemKsType.toString()
-        vRequire(elemFq != "kotlin.collections.List") { "@XmlMap '$kind' of '$owner': List<List<?>> not supported" }
-        vRequire(elemFq != "kotlin.collections.Map") { "@XmlMap '$kind' of '$owner': List<Map<?, ?>> / Map element not supported" }
+        vRequire(elemFq != KOTLIN_COLLECTIONS_LIST) { "@XmlMap '$kind' of '$owner': List<List<?>> not supported" }
+        vRequire(elemFq != KOTLIN_COLLECTIONS_MAP) { "@XmlMap '$kind' of '$owner': List<Map<?, ?>> / Map element not supported" }
 
         val source: Source = if (pathStr.startsWith("@")) {
             val rest = pathStr.substring(1)
@@ -360,8 +373,8 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             else -> vError("@XmlMap '$kind' of '$owner': unsupported type '$elemFq'")
         }
 
-        val typeName = typeNameFor(elemKsType, isList, elemNullable = nullable, listNullable = false)
-        val elemTypeName = typeNameFor(elemKsType, isList = false, elemNullable = nullable, listNullable = false)
+        val typeName = typeNameFor(elemKsType, isList, elemNullable = nullable)
+        val elemTypeName = typeNameFor(elemKsType, isList = false, elemNullable = nullable)
         return FieldSpec(
             name = syntheticName,
             typeName = typeName,
@@ -430,11 +443,11 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
     }
 
     private fun coerceForType(typeFq: String, pattern: String?, fieldName: String): Coerce = when (typeFq) {
-        "kotlin.String" -> Coerce.AsString
-        "kotlin.Int" -> Coerce.Scalar(ScalarKind.INT)
-        "kotlin.Long" -> Coerce.Scalar(ScalarKind.LONG)
-        "kotlin.Double" -> Coerce.Scalar(ScalarKind.DOUBLE)
-        "kotlin.Boolean" -> Coerce.Scalar(ScalarKind.BOOLEAN)
+        KOTLIN_STRING -> Coerce.AsString
+        KOTLIN_INT -> Coerce.Scalar(ScalarKind.INT)
+        KOTLIN_LONG -> Coerce.Scalar(ScalarKind.LONG)
+        KOTLIN_DOUBLE -> Coerce.Scalar(ScalarKind.DOUBLE)
+        KOTLIN_BOOLEAN -> Coerce.Scalar(ScalarKind.BOOLEAN)
         "java.time.LocalDate" -> Coerce.Temporal(TemporalKind.LOCAL_DATE, pattern ?: "")
         "java.time.LocalDateTime" -> Coerce.Temporal(TemporalKind.LOCAL_DATE_TIME, pattern ?: "")
         "java.time.Instant" -> Coerce.Temporal(TemporalKind.INSTANT, pattern ?: "")
@@ -442,14 +455,14 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         else -> vError("Unsupported type '$typeFq' for field '$fieldName'.")
     }
 
-    private fun typeNameFor(t: KSType, isList: Boolean, elemNullable: Boolean, listNullable: Boolean): TypeName {
+    private fun typeNameFor(t: KSType, isList: Boolean, elemNullable: Boolean): TypeName {
         val elemFq = t.declaration.qualifiedName?.asString() ?: t.toString()
         val base: TypeName = when (elemFq) {
-            "kotlin.String" -> STRING
-            "kotlin.Int" -> INT
-            "kotlin.Long" -> LONG
-            "kotlin.Double" -> DOUBLE
-            "kotlin.Boolean" -> BOOLEAN
+            KOTLIN_STRING -> STRING
+            KOTLIN_INT -> INT
+            KOTLIN_LONG -> LONG
+            KOTLIN_DOUBLE -> DOUBLE
+            KOTLIN_BOOLEAN -> BOOLEAN
             else -> {
                 val cn = (t.declaration as? KSClassDeclaration)?.toClassName()
                     ?: ClassName.bestGuess(elemFq)
@@ -457,7 +470,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             }
         }
         val elem = base.copy(nullable = elemNullable)
-        return if (isList) LIST.parameterizedBy(elem).copy(nullable = listNullable) else elem
+        return if (isList) LIST.parameterizedBy(elem).copy(nullable = false) else elem
     }
 
     private fun parseChildPath(path: String, fieldName: String, nsMap: Map<String, String>): Source.Child {
@@ -723,7 +736,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         registry: NestedTypeRegistry,
     ) {
         val pkg = cls.packageName.asString()
-        val recordTypeName: ClassName = ClassName(pkg, cls.simpleName.asString())
+        val recordTypeName = ClassName(pkg, cls.simpleName.asString())
         val parserName = "${cls.simpleName.asString()}Parser"
 
         val flowOfRecord = FLOW.parameterizedBy(recordTypeName)
@@ -1017,7 +1030,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
 
     private fun emitChildrenSwitch(cb: CodeBlock.Builder, node: TrieNode, registry: NestedTypeRegistry) {
         if (node.children.isEmpty()) {
-            cb.add("c.skipChild()\n")
+            cb.add(SKIP_CHILD)
             return
         }
         cb.beginControlFlow("when(ln)")
@@ -1027,7 +1040,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             emitChildBody(cb, child, registry)
             cb.endControlFlow()
         }
-        cb.add("else -> c.skipChild()\n")
+        cb.add(ELSE_SKIP_CHILD)
         cb.endControlFlow()
     }
 
@@ -1041,7 +1054,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         convVarFor: Map<String, String>,
     ) {
         if (directRoot.children.isEmpty() && descendantFields.isEmpty() && mapFields.isEmpty() && polyFields.isEmpty()) {
-            cb.add("c.skipChild()\n")
+            cb.add(SKIP_CHILD)
             return
         }
         val byHead = LinkedHashMap<QKey, MutableList<FieldSpec>>()
@@ -1088,7 +1101,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             cb.endControlFlow()
         }
         if (byHead.isEmpty()) {
-            cb.add("else -> c.skipChild()\n")
+            cb.add(ELSE_SKIP_CHILD)
         } else {
             cb.beginControlFlow("else ->")
             cb.beginControlFlow("c.forEachDescendantInChild·{ dln, dns ->\n")
@@ -1199,7 +1212,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             emitPolyAssign(cb, f, v.subtypeFq, registry)
             cb.endControlFlow()
         }
-        cb.add("else -> c.skipChild()\n")
+        cb.add(ELSE_SKIP_CHILD)
         cb.endControlFlow()
     }
 
@@ -1257,7 +1270,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
                 cb.endControlFlow()
             }
 
-            else -> cb.add("c.skipChild()\n")
+            else -> cb.add(SKIP_CHILD)
         }
     }
 
@@ -1301,7 +1314,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
 
         // Source.MapEntry filtered above via Coerce.MapAggregate; Source.PolyChild filtered via
         // Coerce.Nested. Remaining sources: Attr, Text, Child.
-        when (val src = f.source) {
+        when (f.source) {
             is Source.Attr -> {
                 if (f.nullable) {
                     cb.add("if (%L == null) null else ", rawVar)
@@ -1345,27 +1358,26 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         lcExpr: CodeBlock = CodeBlock.of("__loc"),
     ): CodeBlock {
         val nl = CodeBlock.of("%S", f.name)
-        val lc = lcExpr
         // Coerce.MapAggregate and Coerce.Nested are filtered upstream in coerceField; reaching
         // them here is impossible, so they're not enumerated in this when.
         return when (val coerce = f.coerce) {
             Coerce.AsString -> raw
-            is Coerce.Scalar -> CodeBlock.of("%M(%L, %L, %L)", scalarMember(coerce.kind), nl, raw, lc)
+            is Coerce.Scalar -> CodeBlock.of("%M(%L, %L, %L)", scalarMember(coerce.kind), nl, raw, lcExpr)
             is Coerce.Temporal -> {
                 val m = when (coerce.kind) {
                     TemporalKind.LOCAL_DATE -> COERCE_LOCAL_DATE
                     TemporalKind.LOCAL_DATE_TIME -> COERCE_LOCAL_DATE_TIME
                     TemporalKind.INSTANT -> COERCE_INSTANT
                 }
-                CodeBlock.of("%M(%L, %L, %S, %L)", m, nl, raw, coerce.pattern, lc)
+                CodeBlock.of("%M(%L, %L, %S, %L)", m, nl, raw, coerce.pattern, lcExpr)
             }
 
-            is Coerce.Decimal -> CodeBlock.of("%M(%L, %L, %S, %L)", COERCE_BIG_DECIMAL, nl, raw, coerce.pattern, lc)
+            is Coerce.Decimal -> CodeBlock.of("%M(%L, %L, %S, %L)", COERCE_BIG_DECIMAL, nl, raw, coerce.pattern, lcExpr)
             is Coerce.Custom -> {
                 // registerConverter pre-populates convVarFor for every Coerce.Custom field; lookup
                 // is total here.
                 val varName = convVarFor.getValue(coerce.cls.canonicalName)
-                CodeBlock.of("$varName.convert(%L, %L)", raw, lc)
+                CodeBlock.of("$varName.convert(%L, %L)", raw, lcExpr)
             }
 
             else -> error("unreachable: Coerce.MapAggregate / Coerce.Nested filtered before coerceRaw")
@@ -1387,9 +1399,6 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
 
     private fun stringArg(a: KSAnnotation, name: String): String? =
         a.arguments.firstOrNull { it.name?.asString() == name }?.value as? String
-
-    private fun booleanArg(a: KSAnnotation, name: String): Boolean? =
-        a.arguments.firstOrNull { it.name?.asString() == name }?.value as? Boolean
 
     enum class ScalarKind { INT, LONG, DOUBLE, BOOLEAN }
     enum class TemporalKind { LOCAL_DATE, LOCAL_DATE_TIME, INSTANT }
@@ -1481,7 +1490,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         const val XML_SUBTYPE_FQ = "xmlfluss.XmlSubtype"
 
         val SCALAR_TEMPORAL_FQS: Set<String> = setOf(
-            "kotlin.String", "kotlin.Int", "kotlin.Long", "kotlin.Double", "kotlin.Boolean",
+            KOTLIN_STRING, KOTLIN_INT, KOTLIN_LONG, KOTLIN_DOUBLE, KOTLIN_BOOLEAN,
             "java.time.LocalDate", "java.time.LocalDateTime", "java.time.Instant",
             "java.math.BigDecimal",
         )
@@ -1489,23 +1498,23 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         val FLOW = ClassName("kotlinx.coroutines.flow", "Flow")
         val FLOW_BUILDER = MemberName("kotlinx.coroutines.flow", "flow")
         val INPUT_STREAM = ClassName("java.io", "InputStream")
-        val XML_READ_CURSOR = ClassName("xmlfluss.runtime", "XmlReadCursor")
+        val XML_READ_CURSOR = ClassName(XMLFLUSS_RUNTIME, "XmlReadCursor")
         val COMPILED_PATH = ClassName("xmlfluss.path", "CompiledPath")
-        val PATHS_COMPILE = MemberName(ClassName("xmlfluss.runtime", "Paths"), "compile")
+        val PATHS_COMPILE = MemberName(ClassName(XMLFLUSS_RUNTIME, "Paths"), "compile")
         val MISSING_EX = ClassName("xmlfluss", "XmlParseException", "Missing")
         val MUTABLE_LIST = ClassName("kotlin.collections", "MutableList")
         val LINKED_MAP_OF = MemberName("kotlin.collections", "linkedMapOf")
         val LOCATION = ClassName("xmlfluss", "Location")
         val LOCATION_NULLABLE = LOCATION.copy(nullable = true)
 
-        val COERCE_INT = MemberName(ClassName("xmlfluss.runtime", "Coercions"), "toInt")
-        val COERCE_LONG = MemberName(ClassName("xmlfluss.runtime", "Coercions"), "toLong")
-        val COERCE_DOUBLE = MemberName(ClassName("xmlfluss.runtime", "Coercions"), "toDouble")
-        val COERCE_BOOLEAN = MemberName(ClassName("xmlfluss.runtime", "Coercions"), "toBoolean")
-        val COERCE_LOCAL_DATE = MemberName(ClassName("xmlfluss.runtime", "Coercions"), "toLocalDate")
-        val COERCE_LOCAL_DATE_TIME = MemberName(ClassName("xmlfluss.runtime", "Coercions"), "toLocalDateTime")
-        val COERCE_INSTANT = MemberName(ClassName("xmlfluss.runtime", "Coercions"), "toInstant")
-        val COERCE_BIG_DECIMAL = MemberName(ClassName("xmlfluss.runtime", "Coercions"), "toBigDecimal")
+        val COERCE_INT = MemberName(ClassName(XMLFLUSS_RUNTIME, "Coercions"), "toInt")
+        val COERCE_LONG = MemberName(ClassName(XMLFLUSS_RUNTIME, "Coercions"), "toLong")
+        val COERCE_DOUBLE = MemberName(ClassName(XMLFLUSS_RUNTIME, "Coercions"), "toDouble")
+        val COERCE_BOOLEAN = MemberName(ClassName(XMLFLUSS_RUNTIME, "Coercions"), "toBoolean")
+        val COERCE_LOCAL_DATE = MemberName(ClassName(XMLFLUSS_RUNTIME, "Coercions"), "toLocalDate")
+        val COERCE_LOCAL_DATE_TIME = MemberName(ClassName(XMLFLUSS_RUNTIME, "Coercions"), "toLocalDateTime")
+        val COERCE_INSTANT = MemberName(ClassName(XMLFLUSS_RUNTIME, "Coercions"), "toInstant")
+        val COERCE_BIG_DECIMAL = MemberName(ClassName(XMLFLUSS_RUNTIME, "Coercions"), "toBigDecimal")
         val STRING_NULLABLE = STRING.copy(nullable = true)
     }
 }

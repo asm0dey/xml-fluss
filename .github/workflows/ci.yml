@@ -22,7 +22,12 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
       - name: Build and Test
-        run: ./gradlew build
+        run: ./gradlew build testCodeCoverageReport
+      - name: Upload JaCoCo Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-report
+          path: build/reports/jacoco/testCodeCoverageReport/html/
 
   publish:
     needs: build-test
@@ -41,6 +46,6 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
       - name: Publish to GitHub Packages
-        run: ./gradlew publish
+        run: ./gradlew publish -x test
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

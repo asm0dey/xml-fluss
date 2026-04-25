@@ -1,0 +1,8 @@
+/build/
+
+# KSP generated sources
+/build/generated/
+
+# Kotlin compiled classes
+*.class
+/.kotlin/

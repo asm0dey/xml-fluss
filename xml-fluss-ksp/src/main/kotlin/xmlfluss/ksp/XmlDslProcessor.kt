@@ -94,14 +94,12 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             logger.error("@XmlRecord requires data class", cls)
             return
         }
-        val recordAnn = annotationOf(cls, XML_RECORD_FQ)
-            ?: vError("@XmlRecord annotation not found on ${cls.qualifiedName?.asString()}")
-        val recordPath = stringArg(recordAnn, "path")
-            ?: vError("@XmlRecord missing 'path' on ${cls.qualifiedName?.asString()}")
-
+        // cls came from resolver.getSymbolsWithAnnotation(XML_RECORD_FQ); annotation is guaranteed
+        // present. XmlRecord.path is a non-null String. data classes always carry a primary ctor.
+        val recordAnn = annotationOf(cls, XML_RECORD_FQ)!!
+        val recordPath = stringArg(recordAnn, "path")!!
         val nsMap = collectNs(cls)
-        val ctor = cls.primaryConstructor
-            ?: vError("@XmlRecord class needs primary constructor: ${cls.qualifiedName?.asString()}")
+        val ctor = cls.primaryConstructor!!
 
         val registry = NestedTypeRegistry()
         val fields = ctor.parameters.map { classifyParam(cls, it, nsMap, registry) }
@@ -117,8 +115,9 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         cls.annotations
             .filter { fq(it) == XML_NS_FQ }
             .associate {
-                val prefix = stringArg(it, "prefix") ?: vError("XmlNs.prefix missing on ${cls.qualifiedName?.asString()}")
-                val uri = stringArg(it, "uri") ?: vError("XmlNs.uri missing on ${cls.qualifiedName?.asString()}")
+                // XmlNs.prefix / .uri are declared as non-null String on the annotation.
+                val prefix = stringArg(it, "prefix")!!
+                val uri = stringArg(it, "uri")!!
                 prefix to uri
             }
 
@@ -128,7 +127,8 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         nsMap: Map<String, String>,
         registry: NestedTypeRegistry,
     ): FieldSpec {
-        val name = p.name?.asString() ?: vError("unnamed param in ${cls.qualifiedName?.asString()}")
+        // primary-constructor parameters of a data class are always named.
+        val name = p.name!!.asString()
         val typeRef = p.type.resolve()
         val typeFq = typeRef.declaration.qualifiedName?.asString() ?: typeRef.toString()
         val nullable = typeRef.isMarkedNullable
@@ -193,7 +193,8 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
                 }
 
                 XML_FORMAT_FQ -> {
-                    formatPattern = stringArg(a, "pattern") ?: vError("@XmlFormat missing pattern on '$name'")
+                    // XmlFormat.pattern is a non-null String on the annotation.
+                    formatPattern = stringArg(a, "pattern")!!
                 }
 
                 XML_CONVERTER_FQ -> {
@@ -221,8 +222,9 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
 
         vRequire(!isMap) { "Field '$name' is Map<K, V> but lacks @XmlMap" }
 
-        val elemKsType: KSType = elemKsTypeEarly
-            ?: vError("List<?> argument missing for '$name'")
+        // elemKsTypeEarly is non-null when isMap is false: scalar/nested types resolve to typeRef,
+        // and List<E> always carries its element type under KSP (raw List doesn't compile).
+        val elemKsType: KSType = elemKsTypeEarly!!
         val elemFq = elemKsType.declaration.qualifiedName?.asString() ?: elemKsType.toString()
         val elemNullable = if (isList) elemKsType.isMarkedNullable else nullable
 
@@ -271,18 +273,18 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         nsMap: Map<String, String>,
         registry: NestedTypeRegistry,
     ): FieldSpec {
-        val entry = stringArg(mapAnnot, "entry") ?: vError("@XmlMap missing 'entry' for '$name'")
-        val keyPath = stringArg(mapAnnot, "key") ?: vError("@XmlMap missing 'key' for '$name'")
-        val valPath = stringArg(mapAnnot, "value") ?: vError("@XmlMap missing 'value' for '$name'")
+        // XmlMap.entry / .key / .value are non-null Strings on the annotation.
+        val entry = stringArg(mapAnnot, "entry")!!
+        val keyPath = stringArg(mapAnnot, "key")!!
+        val valPath = stringArg(mapAnnot, "value")!!
         vRequire(entry.isNotBlank() && '/' !in entry && !entry.startsWith("@")) {
             "@XmlMap entry '$entry' for '$name' must be a single element name (optional 'prefix:local')"
         }
         val (entryNs, entryLocal) = resolveQName(entry, nsMap, defaultNs = nsMap[""], path = entry, field = name)
 
-        val keyKsType = typeRef.arguments.getOrNull(0)?.type?.resolve()
-            ?: vError("Map key type missing for '$name'")
-        val valKsType = typeRef.arguments.getOrNull(1)?.type?.resolve()
-            ?: vError("Map value type missing for '$name'")
+        // typeRef is Map<K, V> per isMap check upstream; both type args are present.
+        val keyKsType = typeRef.arguments[0].type!!.resolve()
+        val valKsType = typeRef.arguments[1].type!!.resolve()
 
         val keyField = buildSyntheticMapKvField("mk", keyKsType, keyPath, nsMap, registry, owner = name, kind = "key")
         val valField = buildSyntheticMapKvField("mv", valKsType, valPath, nsMap, registry, owner = name, kind = "value")
@@ -318,9 +320,8 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         vRequire(typeFq != "kotlin.collections.Map") { "@XmlMap '$kind' of '$owner': nested Map<,> not supported" }
         val isList = typeFq == "kotlin.collections.List"
         val nullable = if (isList) false else type.isMarkedNullable
-        val elemKsType: KSType = if (isList) type.arguments.firstOrNull()?.type?.resolve()
-            ?: vError("@XmlMap '$kind' of '$owner': List<?> arg missing")
-        else type
+        // List<E> always exposes a single type argument under KSP.
+        val elemKsType: KSType = if (isList) type.arguments[0].type!!.resolve() else type
         vRequire(!(isList && elemKsType.isMarkedNullable)) {
             "@XmlMap '$kind' of '$owner': nullable element inside List<…> not supported"
         }
@@ -383,9 +384,10 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         cls: KSClassDeclaration,
         parentNs: Map<String, String>,
         registry: NestedTypeRegistry,
-        terminating: Boolean = false,
+        terminating: Boolean,
     ): NestedTypeSpec {
-        val fq = cls.qualifiedName?.asString() ?: vError("nested type missing qualified name")
+        // ensureNested is only called for declared nested data classes; qualified name is present.
+        val fq = cls.qualifiedName!!.asString()
         if (!terminating && registry.inProgress.contains(fq)) {
             val chain = registry.inProgress.toList()
             val start = chain.indexOf(fq).let { if (it < 0) 0 else it }
@@ -410,7 +412,8 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         try {
             val typeName = cls.toClassName()
             val helperName = "__parseNested_${typeName.simpleName}_${registry.byFq.size}"
-            val ctor = cls.primaryConstructor ?: vError("Nested data class needs primary constructor: $fq")
+            // ensureNested is gated by isNestedDataClass; data classes always have a primary ctor.
+            val ctor = cls.primaryConstructor!!
             val stub = NestedTypeSpec(cls, typeName, helperName, ns, emptyList())
             registry.byFq[fq] = stub
             val fields = ctor.parameters.map { classifyParam(cls, it, ns, registry) }
@@ -495,8 +498,9 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         nsMap: Map<String, String>,
         registry: NestedTypeRegistry,
     ): Source.PolyChild {
-        val polyAnnot = annotationOf(sealedDecl, XML_POLYMORPHIC_FQ)
-            ?: vError("polymorphic field '$fieldName': sealed type ${sealedDecl.qualifiedName?.asString()} missing @XmlPolymorphic")
+        // sealedDecl is selected upstream via takeIf { ... annotationOf(it, XML_POLYMORPHIC_FQ) != null };
+        // the annotation is guaranteed present here.
+        val polyAnnot = annotationOf(sealedDecl, XML_POLYMORPHIC_FQ)!!
         val discriminator = stringArg(polyAnnot, "discriminator").orEmpty()
 
         val subtypes = sealedDecl.getSealedSubclasses().toList()
@@ -520,7 +524,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             }
             val variants = subtypes.map { sub ->
                 val subAnnot = annotationOf(sub, XML_SUBTYPE_FQ)!!
-                val subName = stringArg(subAnnot, "name") ?: vError("@XmlSubtype.name missing on ${sub.qualifiedName?.asString()}")
+                val subName = stringArg(subAnnot, "name")!!
                 val (ns, local) = resolveQName(
                     subName, nsMap,
                     defaultNs = nsMap[""],
@@ -558,7 +562,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             )
             val variants = subtypes.map { sub ->
                 val subAnnot = annotationOf(sub, XML_SUBTYPE_FQ)!!
-                val value = stringArg(subAnnot, "name") ?: vError("@XmlSubtype.name missing on ${sub.qualifiedName?.asString()}")
+                val value = stringArg(subAnnot, "name")!!
                 AttrVariant(value, sub.qualifiedName!!.asString())
             }
             vRequire(variants.map { it.value }.toSet().size == variants.size) {
@@ -923,23 +927,13 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             }
 
             else -> {
-                if (needsSetFlag(f)) cb.add("var __set_${f.name}: %T = false\n", BOOLEAN)
+                cb.add("var __set_${f.name}: %T = false\n", BOOLEAN)
                 cb.add("var __raw_${f.name}: %T = null\n", STRING_NULLABLE)
                 if (needsChildLoc(f)) {
                     cb.add("var __loc_${f.name}: %T = null\n", LOCATION_NULLABLE)
                 }
             }
         }
-    }
-
-    /**
-     * `__set_X` is read by [coerceField] for `Source.Child` (missing/null check). `Source.Text`
-     * is declared at the recordText/subrecordText call and never tracked through a flag.
-     * `Source.Attr` never goes through this branch.
-     */
-    private fun needsSetFlag(f: FieldSpec): Boolean = when (f.source) {
-        is Source.Text -> false
-        else -> true
     }
 
     /**
@@ -953,8 +947,10 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             f.coerce !is Coerce.AsString && f.coerce !is Coerce.Nested
 
     private fun emitMapStateInit(cb: CodeBlock.Builder, f: FieldSpec) {
-        val keyF = f.mapKeyField ?: error("map field '${f.name}' missing key field")
-        val valF = f.mapValueField ?: error("map field '${f.name}' missing value field")
+        // emitMapStateInit only runs for Coerce.MapAggregate fields built by classifyMapParam,
+        // which always sets mapKeyField / mapValueField.
+        val keyF = f.mapKeyField!!
+        val valF = f.mapValueField!!
         val storedValueType: TypeName =
             if (valF.isList) MUTABLE_LIST.parameterizedBy(valF.elemTypeName) else valF.typeName
         val storeType = MUTABLE_MAP.parameterizedBy(keyF.typeName, storedValueType)
@@ -968,8 +964,10 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         registry: NestedTypeRegistry,
         convVarFor: Map<String, String>,
     ) {
-        val keyF = f.mapKeyField ?: error("map field '${f.name}' missing key field")
-        val valF = f.mapValueField ?: error("map field '${f.name}' missing value field")
+        // Same invariant as emitMapStateInit: MapAggregate fields always carry both synthetic
+        // key/value FieldSpecs.
+        val keyF = f.mapKeyField!!
+        val valF = f.mapValueField!!
         val synthetic = listOf(keyF, valF)
 
         for (sf in synthetic) {
@@ -1144,8 +1142,8 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
     private fun emitLeafReadInline(cb: CodeBlock.Builder, f: FieldSpec, registry: NestedTypeRegistry) {
         when (f.coerce) {
             is Coerce.Nested -> {
-                val spec = registry.byFq[f.elemTypeFq]
-                    ?: error("missing nested spec for ${f.elemTypeFq}")
+                // ensureNested registers every nested data-class type before emit; lookup is total.
+                val spec = registry.byFq.getValue(f.elemTypeFq)
                 cb.add("val __n_${f.name}·=·${spec.helperName}(c)\n")
                 if (f.isList) {
                     cb.add("__list_${f.name}.add(__n_${f.name})\n")
@@ -1176,8 +1174,8 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         subtypeFq: String,
         registry: NestedTypeRegistry,
     ) {
-        val spec = registry.byFq[subtypeFq]
-            ?: error("missing nested spec for polymorphic subtype $subtypeFq")
+        // buildPolyChild calls ensureNested(sub) for every subtype, so the registry has every spec.
+        val spec = registry.byFq.getValue(subtypeFq)
         cb.add("val __n_${f.name}·=·${spec.helperName}(c)\n")
         if (f.isList) {
             cb.add("__list_${f.name}.add(__n_${f.name})\n")
@@ -1228,8 +1226,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         when {
             hasNested -> {
                 for (f in node.nestedEntries) {
-                    val spec = registry.byFq[f.elemTypeFq]
-                        ?: error("missing nested spec for ${f.elemTypeFq}")
+                    val spec = registry.byFq.getValue(f.elemTypeFq)
                     cb.add("val __n_${f.name}·=·${spec.helperName}(c)\n")
                     if (f.isList) {
                         cb.add("__list_${f.name}.add(__n_${f.name})\n")
@@ -1302,7 +1299,9 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         val orMissing = CodeBlock.of("(%L ?: %L)", rawVar, missingThrow)
         val orEmpty = CodeBlock.of("(%L ?: \"\")", rawVar)
 
-        when (f.source) {
+        // Source.MapEntry filtered above via Coerce.MapAggregate; Source.PolyChild filtered via
+        // Coerce.Nested. Remaining sources: Attr, Text, Child.
+        when (val src = f.source) {
             is Source.Attr -> {
                 if (f.nullable) {
                     cb.add("if (%L == null) null else ", rawVar)
@@ -1333,8 +1332,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
                 }
             }
 
-            is Source.MapEntry -> error("Source.MapEntry should be handled before coerceField switch")
-            is Source.PolyChild -> error("Source.PolyChild should be handled via Coerce.Nested before coerceField switch")
+            else -> Unit
         }
         cb.add("\n")
         return cb.build()
@@ -1348,9 +1346,10 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
     ): CodeBlock {
         val nl = CodeBlock.of("%S", f.name)
         val lc = lcExpr
+        // Coerce.MapAggregate and Coerce.Nested are filtered upstream in coerceField; reaching
+        // them here is impossible, so they're not enumerated in this when.
         return when (val coerce = f.coerce) {
             Coerce.AsString -> raw
-            Coerce.MapAggregate -> error("Coerce.MapAggregate should be handled before coerceRaw")
             is Coerce.Scalar -> CodeBlock.of("%M(%L, %L, %L)", scalarMember(coerce.kind), nl, raw, lc)
             is Coerce.Temporal -> {
                 val m = when (coerce.kind) {
@@ -1363,11 +1362,13 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
 
             is Coerce.Decimal -> CodeBlock.of("%M(%L, %L, %S, %L)", COERCE_BIG_DECIMAL, nl, raw, coerce.pattern, lc)
             is Coerce.Custom -> {
-                val varName = convVarFor[coerce.cls.canonicalName] ?: error("no converter var for ${coerce.cls}")
+                // registerConverter pre-populates convVarFor for every Coerce.Custom field; lookup
+                // is total here.
+                val varName = convVarFor.getValue(coerce.cls.canonicalName)
                 CodeBlock.of("$varName.convert(%L, %L)", raw, lc)
             }
 
-            is Coerce.Nested -> error("Coerce.Nested should be handled before coerceRaw")
+            else -> error("unreachable: Coerce.MapAggregate / Coerce.Nested filtered before coerceRaw")
         }
     }
 

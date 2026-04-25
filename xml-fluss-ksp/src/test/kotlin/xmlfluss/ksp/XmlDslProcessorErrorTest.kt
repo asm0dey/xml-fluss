@@ -303,4 +303,553 @@ class XmlDslProcessorErrorTest {
         )
         assertFailsWith(src, "has no @XmlAttr/@XmlChild/@XmlText/@XmlMap")
     }
+
+    @Test
+    fun trieMixesTextAndNestedAtSameElement() {
+        val src = SourceFile.kotlin(
+            "MixTextNested.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+            import xmlfluss.XmlText
+
+            data class Inner(@XmlText val body: String)
+
+            @XmlRecord("//doc")
+            data class Doc(
+                @XmlChild("x") val x: String,
+                @XmlChild("x") val xn: Inner,
+            )
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "cannot mix text/nested/descend at same element")
+    }
+
+    @Test
+    fun trieMultipleNonListTextFieldsAtSameElement() {
+        val src = SourceFile.kotlin(
+            "TwoNonListTexts.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord("//doc")
+            data class Doc(
+                @XmlChild("x") val a: String,
+                @XmlChild("x") val b: String,
+            )
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "multiple non-list text fields")
+    }
+
+    @Test
+    fun trieMultipleNonListNestedFieldsAtSameElement() {
+        val src = SourceFile.kotlin(
+            "TwoNonListNested.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+            import xmlfluss.XmlText
+
+            data class A(@XmlText val v: String)
+            data class B(@XmlText val v: String)
+
+            @XmlRecord("//doc")
+            data class Doc(
+                @XmlChild("x") val a: A,
+                @XmlChild("x") val b: B,
+            )
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "multiple non-list nested fields")
+    }
+
+    @Test
+    fun trieMixListAndNonListNested() {
+        val src = SourceFile.kotlin(
+            "MixListNested.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+            import xmlfluss.XmlText
+
+            data class A(@XmlText val v: String)
+
+            @XmlRecord("//doc")
+            data class Doc(
+                @XmlChild("x") val a: A,
+                @XmlChild("x") val xs: List<A>,
+            )
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "cannot mix list and non-list nested fields")
+    }
+
+    @Test
+    fun unboundNamespacePrefixInChildPath() {
+        val src = SourceFile.kotlin(
+            "BadPrefix.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord("//doc")
+            data class Doc(@XmlChild("foo:bar") val v: String)
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "unbound NS prefix 'foo'")
+    }
+
+    @Test
+    fun emptyLocalInQNameRejected() {
+        val src = SourceFile.kotlin(
+            "EmptyLocal.kt",
+            """
+            package sample
+            import xmlfluss.XmlNs
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlNs(prefix = "p", uri = "urn:p")
+            @XmlRecord("//doc")
+            data class Doc(@XmlChild("p:") val v: String)
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "bad qname")
+    }
+
+    @Test
+    fun descendantHeadCollidesWithDirectChild() {
+        val src = SourceFile.kotlin(
+            "DescendVsDirect.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord("//doc")
+            data class Doc(
+                @XmlChild("x") val a: String,
+                @XmlChild("//x") val b: String,
+            )
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "target the same head element")
+    }
+
+    @Test
+    fun mapEntryClashesWithChildHead() {
+        val src = SourceFile.kotlin(
+            "MapVsChild.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlMap
+            import xmlfluss.XmlRecord
+
+            @XmlRecord("//doc")
+            data class Doc(
+                @XmlChild("e") val s: String,
+                @XmlMap(entry = "e", key = "@k", value = ".") val m: Map<String, String>,
+            )
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "clashes with another @XmlChild")
+    }
+
+    @Test
+    fun listFieldNullableRejected() {
+        val src = SourceFile.kotlin(
+            "NullableList.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord("//doc")
+            data class Doc(@XmlChild("x") val xs: List<String>?)
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "must not be nullable")
+    }
+
+    @Test
+    fun multipleBindingsOnOneField() {
+        val src = SourceFile.kotlin(
+            "TwoBindings.kt",
+            """
+            package sample
+            import xmlfluss.XmlAttr
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord("//doc")
+            data class Doc(@XmlAttr @XmlChild("x") val v: String)
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "multiple xml bindings")
+    }
+
+    @Test
+    fun mapWithoutXmlMapAnnotation() {
+        val src = SourceFile.kotlin(
+            "BareMap.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord("//doc")
+            data class Doc(@XmlChild("m") val m: Map<String, String>)
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "lacks @XmlMap")
+    }
+
+    @Test
+    fun unsupportedFieldTypeRejected() {
+        val src = SourceFile.kotlin(
+            "BadType.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            class NotData(val v: String)
+
+            @XmlRecord("//doc")
+            data class Doc(@XmlChild("v") val v: NotData)
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "Unsupported type")
+    }
+
+    @Test
+    fun xmlFormatOnPolymorphicFieldRejected() {
+        val src = SourceFile.kotlin(
+            "FormatOnPoly.kt",
+            """
+            package sample
+            import xmlfluss.XmlAttr
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlFormat
+            import xmlfluss.XmlPolymorphic
+            import xmlfluss.XmlRecord
+            import xmlfluss.XmlSubtype
+
+            @XmlPolymorphic
+            sealed class Shape
+            @XmlSubtype(name = "circle")
+            data class Circle(@XmlAttr val r: Int) : Shape()
+
+            @XmlRecord("//doc")
+            data class Doc(
+                @XmlChild @XmlFormat(pattern = "x") val s: Shape,
+            )
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "@XmlFormat / @XmlConverter not supported on polymorphic field")
+    }
+
+    @Test
+    fun nestedDataClassWithXmlAttrRejected() {
+        val src = SourceFile.kotlin(
+            "NestedAsAttr.kt",
+            """
+            package sample
+            import xmlfluss.XmlAttr
+            import xmlfluss.XmlRecord
+            import xmlfluss.XmlText
+
+            data class Inner(@XmlText val v: String)
+
+            @XmlRecord("//doc")
+            data class Doc(@XmlAttr("x") val x: Inner)
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "Nested data-class field 'x' must use @XmlChild")
+    }
+
+    @Test
+    fun mapValueListWithNullableElementRejected() {
+        val src = SourceFile.kotlin(
+            "MapNullableListElem.kt",
+            """
+            package sample
+            import xmlfluss.XmlMap
+            import xmlfluss.XmlRecord
+
+            @XmlRecord("//doc")
+            data class Doc(
+                @XmlMap(entry = "e", key = "@k", value = "v")
+                val m: Map<String, List<String?>>,
+            )
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "nullable element inside List")
+    }
+
+    @Test
+    fun mapValueAsNestedDataClassViaAttrPathRejected() {
+        val src = SourceFile.kotlin(
+            "MapNestedViaAttr.kt",
+            """
+            package sample
+            import xmlfluss.XmlAttr
+            import xmlfluss.XmlMap
+            import xmlfluss.XmlRecord
+            import xmlfluss.XmlText
+
+            data class Detail(@XmlAttr val k: String, @XmlText val v: String)
+
+            @XmlRecord("//doc")
+            data class Doc(
+                @XmlMap(entry = "e", key = "@k", value = "@v")
+                val m: Map<String, Detail>,
+            )
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "nested data-class type requires an element path")
+    }
+
+    @Test
+    fun mapUnsupportedValueTypeRejected() {
+        val src = SourceFile.kotlin(
+            "MapUnsupportedVal.kt",
+            """
+            package sample
+            import xmlfluss.XmlMap
+            import xmlfluss.XmlRecord
+
+            class NotData(val v: String)
+
+            @XmlRecord("//doc")
+            data class Doc(
+                @XmlMap(entry = "e", key = "@k", value = ".")
+                val m: Map<String, NotData>,
+            )
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "unsupported type")
+    }
+
+    @Test
+    fun nestedDataClassMultipleXmlTextRejected() {
+        val src = SourceFile.kotlin(
+            "NestedMultiText.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+            import xmlfluss.XmlText
+
+            data class Inner(
+                @XmlText val a: String,
+                @XmlText val b: String,
+            )
+
+            @XmlRecord("//doc")
+            data class Doc(@XmlChild("inner") val inner: Inner)
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "multiple @XmlText fields not allowed")
+    }
+
+    @Test
+    fun childPathInvalidSyntaxLeadingSlashRejected() {
+        val src = SourceFile.kotlin(
+            "BadPathLeadingSlash.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord("//doc")
+            data class Doc(@XmlChild("/foo") val x: String)
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "invalid syntax")
+    }
+
+    @Test
+    fun descendantHeadIsAttributeRejected() {
+        val src = SourceFile.kotlin(
+            "DescendAttrHead.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord("//doc")
+            data class Doc(@XmlChild("//@x") val x: String)
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "descendant axis head must be an element")
+    }
+
+    @Test
+    fun sealedPolymorphicWithoutSubclassesRejected() {
+        val src = SourceFile.kotlin(
+            "PolyEmpty.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlPolymorphic
+            import xmlfluss.XmlRecord
+
+            @XmlPolymorphic
+            sealed class Shape
+
+            @XmlRecord("//doc")
+            data class Doc(@XmlChild val s: Shape)
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "has no subclasses")
+    }
+
+    @Test
+    fun polySubtypeNotDataClassRejected() {
+        val src = SourceFile.kotlin(
+            "PolyNonData.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlPolymorphic
+            import xmlfluss.XmlRecord
+            import xmlfluss.XmlSubtype
+
+            @XmlPolymorphic
+            sealed class Shape
+            @XmlSubtype(name = "circle")
+            class Circle : Shape()
+
+            @XmlRecord("//doc")
+            data class Doc(@XmlChild val s: Shape)
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "must be a data class")
+    }
+
+    @Test
+    fun polySubtypeMissingXmlSubtypeRejected() {
+        val src = SourceFile.kotlin(
+            "PolyNoSubtype.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlPolymorphic
+            import xmlfluss.XmlRecord
+            import xmlfluss.XmlSubtype
+
+            @XmlPolymorphic
+            sealed class Shape
+            @XmlSubtype(name = "circle")
+            data class Circle(@XmlChild("r") val r: Int) : Shape()
+            data class Naked(@XmlChild("n") val n: Int) : Shape()
+
+            @XmlRecord("//doc")
+            data class Doc(@XmlChild val s: Shape)
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "missing @XmlSubtype")
+    }
+
+    @Test
+    fun polyTagModeWithNonEmptyPathRejected() {
+        val src = SourceFile.kotlin(
+            "PolyTagWithPath.kt",
+            """
+            package sample
+            import xmlfluss.XmlAttr
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlPolymorphic
+            import xmlfluss.XmlRecord
+            import xmlfluss.XmlSubtype
+
+            @XmlPolymorphic
+            sealed class Shape
+            @XmlSubtype(name = "circle")
+            data class Circle(@XmlAttr val r: Int) : Shape()
+
+            @XmlRecord("//doc")
+            data class Doc(@XmlChild("shape") val s: Shape)
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "tag-mode @XmlChild path must be empty")
+    }
+
+    @Test
+    fun polyDiscriminatorContainsSlashRejected() {
+        val src = SourceFile.kotlin(
+            "PolyBadDiscSlash.kt",
+            """
+            package sample
+            import xmlfluss.XmlAttr
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlPolymorphic
+            import xmlfluss.XmlRecord
+            import xmlfluss.XmlSubtype
+
+            @XmlPolymorphic(discriminator = "@a/b")
+            sealed class Shape
+            @XmlSubtype(name = "circle")
+            data class Circle(@XmlAttr val r: Int) : Shape()
+
+            @XmlRecord("//doc")
+            data class Doc(@XmlChild("shape") val s: Shape)
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "bad discriminator")
+    }
+
+    @Test
+    fun polyAttrModePathNotDirectChildRejected() {
+        val src = SourceFile.kotlin(
+            "PolyAttrBadPath.kt",
+            """
+            package sample
+            import xmlfluss.XmlAttr
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlPolymorphic
+            import xmlfluss.XmlRecord
+            import xmlfluss.XmlSubtype
+
+            @XmlPolymorphic(discriminator = "@kind")
+            sealed class Shape
+            @XmlSubtype(name = "circle")
+            data class Circle(@XmlAttr val r: Int) : Shape()
+
+            @XmlRecord("//doc")
+            data class Doc(@XmlChild("wrap/shape") val s: Shape)
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "attr-mode @XmlChild path must be a single direct-child element")
+    }
+
+    @Test
+    fun xmlFormatOnConverterFieldRejectedViaMap() {
+        val src = SourceFile.kotlin(
+            "MapWithFormat.kt",
+            """
+            package sample
+            import xmlfluss.XmlFormat
+            import xmlfluss.XmlMap
+            import xmlfluss.XmlRecord
+
+            @XmlRecord("//doc")
+            data class Doc(
+                @XmlMap(entry = "e", key = "@k", value = ".")
+                @XmlFormat(pattern = "yyyy")
+                val m: Map<String, String>,
+            )
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "@XmlFormat / @XmlConverter not supported on @XmlMap field")
+    }
 }

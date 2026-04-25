@@ -1,0 +1,8 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Run all tests" type="CompoundRunConfigurationType">
+    <toRun name="Tests in 'xml-fluss.xml-fluss-ksp.test'" type="GradleRunConfiguration" />
+    <toRun name="Tests in 'xml-fluss.xml-fluss-runtime'" type="GradleRunConfiguration" />
+    <toRun name="Tests in 'xml-fluss.xml-fluss-test'" type="GradleRunConfiguration" />
+    <method v="2" />
+  </configuration>
+</component>

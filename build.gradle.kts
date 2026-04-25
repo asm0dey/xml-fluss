@@ -1,17 +1,15 @@
-import org.gradle.api.publish.PublishingExtension
-import org.gradle.api.publish.maven.MavenPublication
-
 plugins {
     kotlin("jvm") version "2.3.21" apply false
     id("com.google.devtools.ksp") version "2.3.7" apply false
     id("org.jetbrains.dokka") version "2.2.0" apply false
+    id("org.jetbrains.dokka-javadoc") version "2.2.0" apply false
+    id("com.vanniktech.maven.publish") version "0.36.0" apply false
     `jacoco-report-aggregation`
-    `maven-publish`
 }
 
 allprojects {
     group = "site.asm0dey.xmlfluss"
-    version = "0.1.0-SNAPSHOT"
+    version = "0.1.0"
 
     repositories {
         mavenCentral()
@@ -20,38 +18,10 @@ allprojects {
 
 subprojects {
     apply(plugin = "jacoco")
-    apply(plugin = "maven-publish")
-    apply(plugin = "org.jetbrains.dokka")
-
-    val dokkaJavadocJar by tasks.registering(Jar::class) {
-        archiveClassifier.set("javadoc")
-        from(tasks.named("dokkaJavadoc"))
-    }
 
     tasks.withType<Test> {
         extensions.configure<JacocoTaskExtension> {
             isEnabled = true
-        }
-    }
-
-    configure<PublishingExtension> {
-        publications {
-            create<MavenPublication>("maven") {
-                afterEvaluate {
-                    from(components["java"])
-                    artifact(dokkaJavadocJar)
-                }
-            }
-        }
-        repositories {
-            maven {
-                name = "GitHubPackages"
-                url = uri("https://maven.pkg.github.com/asm0dey/xml-fluss")
-                credentials {
-                    username = project.findProperty("gpr.user") as String? ?: System.getenv("GITHUB_ACTOR")
-                    password = project.findProperty("gpr.key") as String? ?: System.getenv("GITHUB_TOKEN")
-                }
-            }
         }
     }
 }

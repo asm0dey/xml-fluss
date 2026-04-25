@@ -2,6 +2,22 @@
 
 Streaming XML parser for the JVM. Annotate a data class, get a typed `Flow<T>` parser generated at compile time. Built on Aalto StAX + KSP + KotlinPoet.
 
+## Install
+
+Artifacts are published to Maven Central under `site.asm0dey.xmlfluss`.
+
+```kotlin
+plugins {
+    kotlin("jvm")
+    id("com.google.devtools.ksp") version "2.3.7"
+}
+
+dependencies {
+    implementation("site.asm0dey.xmlfluss:xml-fluss-runtime:0.1.0")
+    ksp("site.asm0dey.xmlfluss:xml-fluss-ksp:0.1.0")
+}
+```
+
 ## Why the name?
 
 **xml-fluss** combines the technical focus with a catchy German-English pun:
@@ -372,3 +388,7 @@ Aalto well-formedness errors (truncated input, mismatched tags, illegal XML) cur
 ```
 
 Stack: Kotlin 2.3.20, KSP 2.3.6, KotlinPoet 2.3.0, Aalto-XML 1.3.3, kotlinx-coroutines 1.10.1, JUnit Jupiter 5.11.4. JDK toolchain 17.
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE).

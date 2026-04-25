@@ -22,7 +22,7 @@ Mini-XPath subset, parsed by `xmlfluss.path.PathParser`:
 |---|---|---|
 | `//author` | descendant axis — match anywhere | `@XmlRecord`, `@XmlChild` |
 | `/library/section/author` | absolute path from document root | `@XmlRecord` |
-| `authors/author` | relative descendant (auto-prepended `//`) | `@XmlRecord` |
+| `authors/author` | relative path (auto-prepended `//`) | `@XmlRecord` |
 | `//author[@role='main']` | predicate filter | `@XmlRecord` |
 | `{uri}local` | namespaced via Clark notation | `@XmlRecord` |
 | `atom:entry`, `atom:title` | namespaced via `@XmlNs` prefix | `@XmlRecord`, `@XmlChild`, `@XmlMap` |
@@ -67,7 +67,7 @@ data class Entry(
 Generated artifact: `${Record}Parser` object with:
 
 ```kotlin
-public fun parse(input: InputStream, ignoreNamespace: Boolean = false): Flow<Entry>
+public fun parse(input: InputStream, ignoreNamespace: Boolean = false): Flow<T>
 ```
 
 Pass `ignoreNamespace = true` to drop every element/attribute namespace at the cursor — useful when a producer omits the declared namespace (or uses a different one) and you don't want to fork the data class. The flag flows through the `PathMatcher` (record-path element + attribute-predicate matching), the `recordAttr` / `childAttr` lookups, and the codegen-emitted child `when` arms.
@@ -97,7 +97,7 @@ or the path is non-trivial (multi-segment, descendant, attribute leaf, namespace
 
 ### 2. Anchored record paths
 
-`@XmlRecord("/library/section/author")` matches only at the absolute path. `authors/author` is auto-anchored as `//authors/author` (relative descendant).
+`@XmlRecord("/library/section/author")` matches only at the absolute path. `authors/author` is auto-prepended with `//` and matches `//authors/author` (relative descendant).
 
 ### 3. Predicate filters
 
@@ -154,6 +154,8 @@ Since predicates are evaluated at the moment the parser encounters the opening t
 ```
 
 `String`, `Int`, `Long`, `Double`, `Boolean`, `LocalDate`, `LocalDateTime`, `Instant`, `BigDecimal`, all with `T?` variants.
+
+**Boolean literals**: In addition to `true`/`false`, the parser accepts `1`/`0` and `yes`/`no` (case-insensitive, surrounding whitespace ignored) as boolean values.
 
 ### 5. Nullable vs missing
 
@@ -221,8 +223,10 @@ Default namespace via `@XmlNs("", uri)` — bare element segments resolve to `ur
 
 ```kotlin
 @XmlNs("xml", "http://www.w3.org/XML/1998/namespace")
-@XmlAttr("xml:lang")        val lang: String,
-@XmlChild("link/@xml:lang") val linkLang: String?,
+data class Link(
+    @XmlAttr("xml:lang")        val lang: String,
+    @XmlChild("link/@xml:lang") val linkLang: String?,
+)
 ```
 
 Bare `@XmlAttr("name")` always null-NS — the class default namespace does *not* apply to attributes (XML spec).

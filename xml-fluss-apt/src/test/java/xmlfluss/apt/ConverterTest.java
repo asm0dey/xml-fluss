@@ -106,9 +106,10 @@ final class ConverterTest {
     void converterIsExposedAsStaticFinalFieldOnGeneratedParser() throws Exception {
         try (var h = AptTestHarness.compile(MONEY_SRC, MONEY_CONVERTER_SRC, ITEM_SRC)) {
             Class<?> parser = h.parser("sample.Item").parserClass();
+            Class<?> converterClass = parser.getClassLoader().loadClass("sample.MoneyConverter");
             boolean found = false;
             for (Field f : parser.getDeclaredFields()) {
-                if (!"sample.MoneyConverter".equals(f.getType().getName())) continue;
+                if (!converterClass.isAssignableFrom(f.getType())) continue;
                 int mods = f.getModifiers();
                 assertTrue(Modifier.isStatic(mods), "converter field must be static");
                 assertTrue(Modifier.isFinal(mods), "converter field must be final");
@@ -237,7 +238,16 @@ final class ConverterTest {
             Class<?> parser = h.parser("sample.Item").parserClass();
             int fieldCount = 0;
             for (Field f : parser.getDeclaredFields()) {
-                if ("sample.BoxC".equals(f.getType().getName())) fieldCount++;
+                try {
+                    if (h.parser("sample.Item")
+                            .parserClass()
+                            .getClassLoader()
+                            .loadClass("sample.BoxC")
+                            .isAssignableFrom(f.getType()))
+                        fieldCount++;
+                } catch (ClassNotFoundException e) {
+                    // BoxC not found, skip field
+                }
             }
             assertEquals(1, fieldCount,
                     "two field-uses of the same converter class must share a single static field");

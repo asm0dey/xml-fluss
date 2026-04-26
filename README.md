@@ -1,10 +1,28 @@
 # xml-fluss
 
-Streaming XML parser for the JVM. Annotate a data class, get a typed `Flow<T>` parser generated at compile time. Built on Aalto StAX + KSP + KotlinPoet.
+Streaming XML parser for the JVM. Annotate a Kotlin `data class` (KSP → `Flow<T>`) or a Java `record` (annotation processor → `Stream<T>`); the parser is generated at compile time. Built on Aalto StAX + KotlinPoet / JavaPoet.
 
-## Install
+## Table of contents
+
+- [Why the name?](#why-the-name)
+- [Premise](#premise)
+- [Install — KSP (Kotlin)](#install--ksp-kotlin)
+- [Install — APT (Java)](#install--apt-java)
+- [Path syntax](#path-syntax)
+- [Annotation surface](#annotation-surface)
+- [Usage patterns](#usage-patterns)
+- [Architecture](#architecture)
+- [Error model](#error-model)
+- [Build](#build)
+- [License](#license)
 
 Artifacts are published to Maven Central under `site.asm0dey.xmlfluss`.
+
+## Install — KSP (Kotlin)
+
+Generates a Kotlin `object` exposing `parse(InputStream, ignoreNamespace: Boolean = false): Flow<T>` per annotated `data class`.
+
+### Gradle
 
 ```kotlin
 plugins {
@@ -17,6 +35,106 @@ dependencies {
     ksp("site.asm0dey.xmlfluss:xml-fluss-ksp:0.1.0")
 }
 ```
+
+<details>
+<summary><b>Maven</b></summary>
+
+KSP itself ships only a Gradle plugin, but the community-maintained [`me.kpavlov.ksp.maven:ksp-maven-plugin`](https://github.com/kpavlov/ksp-maven-plugin) wires KSP2 processors into a Maven build. Add `xml-fluss-ksp` as a plugin dependency (KSP processors are plugin deps, not project deps):
+
+```xml
+<dependencies>
+  <dependency>
+    <groupId>site.asm0dey.xmlfluss</groupId>
+    <artifactId>xml-fluss-runtime</artifactId>
+    <version>0.1.0</version>
+  </dependency>
+</dependencies>
+
+<build>
+  <plugins>
+    <plugin>
+      <groupId>me.kpavlov.ksp.maven</groupId>
+      <artifactId>ksp-maven-plugin</artifactId>
+      <version><!-- latest from Maven Central --></version>
+      <extensions>true</extensions>
+      <executions>
+        <execution>
+          <goals>
+            <goal>process</goal>
+            <goal>process-test</goal>
+          </goals>
+        </execution>
+      </executions>
+      <dependencies>
+        <dependency>
+          <groupId>site.asm0dey.xmlfluss</groupId>
+          <artifactId>xml-fluss-ksp</artifactId>
+          <version>0.1.0</version>
+        </dependency>
+      </dependencies>
+    </plugin>
+    <!-- plus the standard kotlin-maven-plugin to compile your sources -->
+  </plugins>
+</build>
+```
+
+Requires Maven 3.6.0+, JDK 11+, Kotlin 2.2+. xml-fluss does not test this path on every release — file an issue if you hit a regression.
+
+</details>
+
+## Install — APT (Java)
+
+Generates a Java `final class` exposing `parse(InputStream): java.util.stream.Stream<T>` per annotated `record`. Java callers pass annotation members by name: `@XmlAttr(name = "id")`, `@XmlChild(path = "atom:title")`.
+
+### Gradle
+
+```kotlin
+plugins {
+    `java-library`
+}
+
+dependencies {
+    implementation("site.asm0dey.xmlfluss:xml-fluss-runtime:0.1.0")
+    annotationProcessor("site.asm0dey.xmlfluss:xml-fluss-apt:0.1.0")
+}
+```
+
+<details>
+<summary><b>Maven</b></summary>
+
+```xml
+<dependencies>
+  <dependency>
+    <groupId>site.asm0dey.xmlfluss</groupId>
+    <artifactId>xml-fluss-runtime</artifactId>
+    <version>0.1.0</version>
+  </dependency>
+</dependencies>
+
+<build>
+  <plugins>
+    <plugin>
+      <groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-compiler-plugin</artifactId>
+      <version>3.13.0</version>
+      <configuration>
+        <release>17</release>
+        <annotationProcessorPaths>
+          <path>
+            <groupId>site.asm0dey.xmlfluss</groupId>
+            <artifactId>xml-fluss-apt</artifactId>
+            <version>0.1.0</version>
+          </path>
+        </annotationProcessorPaths>
+      </configuration>
+    </plugin>
+  </plugins>
+</build>
+```
+
+</details>
+
+The KSP and APT processors share the same `xmlfluss.*` annotation surface — `@XmlRecord`, `@XmlAttr`, `@XmlChild`, `@XmlText`, `@XmlMap`, `@XmlNs`, `@XmlFormat`, `@XmlConverter`, `@XmlPolymorphic`, `@XmlSubtype`. Examples in the rest of this README are written in Kotlin; the Java mapping is mechanical (named members + `record` instead of `data class`).
 
 ## Why the name?
 
@@ -345,10 +463,15 @@ Subtypes are nested data classes — they don't need `@XmlRecord` and inherit th
 ```
 xml-fluss-runtime   annotations, exceptions, Converter SPI, path AST + matcher, Aalto cursor, Coercions
 xml-fluss-ksp       KSP processor: scans @XmlRecord data classes, emits parsers via KotlinPoet
-xml-fluss-test      sample data class + JUnit5 tests
+xml-fluss-apt       javac annotation processor: scans @XmlRecord Java records, emits parsers via JavaPoet
+xml-fluss-test      sample records / data classes + JUnit5 tests covering both processors
 ```
 
-Generated parser drives `XmlReadCursor`:
+Generated parsers carry `@javax.annotation.processing.Generated(value = "xml-fluss-{ksp|apt}", date = "...")` so IDE inspections and coverage tools can recognise them.
+
+Generated Kotlin parsers drive `XmlReadCursor` directly. Generated Java parsers go through `JavaCursorAdapter`, which exposes the same cursor surface to javac-friendly types and converts the resulting `Flow<T>` into `java.util.stream.Stream<T>`.
+
+`XmlReadCursor` API:
 - `findNextRecord()` — advances Aalto reader until path matches at a `START_ELEMENT`
 - `recordAttr(ns, name)` / `recordLocation()` — read record attributes / position
 - `forEachRecordChild { ln, ns -> ... }` — iterate direct children; body must call exactly one of `childText()` / `skipChild()` to consume the child subtree
@@ -387,7 +510,9 @@ Aalto well-formedness errors (truncated input, mismatched tags, illegal XML) cur
 ./gradlew test        # tests only
 ```
 
-Stack: Kotlin 2.3.20, KSP 2.3.6, KotlinPoet 2.3.0, Aalto-XML 1.3.3, kotlinx-coroutines 1.10.1, JUnit Jupiter 5.11.4. JDK toolchain 17.
+Stack: Kotlin 2.3.21, KSP 2.3.7, KotlinPoet 2.3.0, Palantir JavaPoet 0.14.0, Aalto-XML 1.3.4, kotlinx-coroutines 1.10.2, jspecify 1.0.0, JUnit Jupiter 6.0.3. JDK toolchain 17.
+
+Shared publishing config (Maven Central + GitHub Packages, POM, Dokka javadoc) lives in the `xml-fluss-publish` precompiled convention plugin under `buildSrc/`; per-module build scripts only set `artifactName` / `artifactDescription` / `inceptionYear`.
 
 ## License
 

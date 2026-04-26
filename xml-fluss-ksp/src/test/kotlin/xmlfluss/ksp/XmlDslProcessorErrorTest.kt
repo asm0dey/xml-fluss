@@ -42,11 +42,11 @@ class XmlDslProcessorErrorTest {
             import xmlfluss.XmlRecord
 
             @XmlNs(prefix = "a", uri = "urn:one")
-            data class Inner(@XmlChild("a:x") val x: String)
+            data class Inner(@XmlChild(path = "a:x") val x: String)
 
             @XmlNs(prefix = "a", uri = "urn:two")
-            @XmlRecord("//root")
-            data class Outer(@XmlChild("inner") val inner: Inner)
+            @XmlRecord(path = "//root")
+            data class Outer(@XmlChild(path = "inner") val inner: Inner)
             """.trimIndent(),
         )
         assertFailsWith(src, "redeclares @XmlNs prefix")
@@ -66,11 +66,11 @@ class XmlDslProcessorErrorTest {
             @XmlPolymorphic
             sealed class Shape
             @XmlSubtype(name = "circle")
-            data class Circle(@XmlChild("r") val r: Int) : Shape()
+            data class Circle(@XmlChild(path = "r") val r: Int) : Shape()
             @XmlSubtype(name = "circle")
-            data class AnotherCircle(@XmlChild("r") val r: Int) : Shape()
+            data class AnotherCircle(@XmlChild(path = "r") val r: Int) : Shape()
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(@XmlChild val shape: Shape)
             """.trimIndent(),
         )
@@ -91,12 +91,12 @@ class XmlDslProcessorErrorTest {
             @XmlPolymorphic(discriminator = "@kind")
             sealed class Shape
             @XmlSubtype(name = "circle")
-            data class C1(@XmlChild("r") val r: Int) : Shape()
+            data class C1(@XmlChild(path = "r") val r: Int) : Shape()
             @XmlSubtype(name = "circle")
-            data class C2(@XmlChild("r") val r: Int) : Shape()
+            data class C2(@XmlChild(path = "r") val r: Int) : Shape()
 
-            @XmlRecord("//doc")
-            data class Doc(@XmlChild("shape") val shape: Shape)
+            @XmlRecord(path = "//doc")
+            data class Doc(@XmlChild(path = "shape") val shape: Shape)
             """.trimIndent(),
         )
         assertFailsWith(src, "duplicate @XmlSubtype values")
@@ -116,10 +116,10 @@ class XmlDslProcessorErrorTest {
             @XmlPolymorphic(discriminator = "kind")
             sealed class Shape
             @XmlSubtype(name = "circle")
-            data class C(@XmlChild("r") val r: Int) : Shape()
+            data class C(@XmlChild(path = "r") val r: Int) : Shape()
 
-            @XmlRecord("//doc")
-            data class Doc(@XmlChild("shape") val shape: Shape)
+            @XmlRecord(path = "//doc")
+            data class Doc(@XmlChild(path = "shape") val shape: Shape)
             """.trimIndent(),
         )
         assertFailsWith(src, "discriminator must start with '@'")
@@ -139,9 +139,9 @@ class XmlDslProcessorErrorTest {
             @XmlPolymorphic(discriminator = "@kind")
             sealed class Shape
             @XmlSubtype(name = "circle")
-            data class C(@XmlChild("r") val r: Int) : Shape()
+            data class C(@XmlChild(path = "r") val r: Int) : Shape()
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(@XmlChild val shape: Shape)
             """.trimIndent(),
         )
@@ -157,7 +157,7 @@ class XmlDslProcessorErrorTest {
             import xmlfluss.XmlMap
             import xmlfluss.XmlRecord
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
                 @XmlMap(entry = "wrap/item", key = "@k", value = ".")
                 val m: Map<String, String>,
@@ -176,7 +176,7 @@ class XmlDslProcessorErrorTest {
             import xmlfluss.XmlMap
             import xmlfluss.XmlRecord
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
                 @XmlMap(entry = "e", key = "@k", value = "v")
                 val m: Map<String, List<List<String>>>,
@@ -195,7 +195,7 @@ class XmlDslProcessorErrorTest {
             import xmlfluss.XmlText
             import xmlfluss.XmlRecord
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
                 @XmlText val a: String,
                 @XmlText val b: String,
@@ -214,7 +214,7 @@ class XmlDslProcessorErrorTest {
             import xmlfluss.XmlText
             import xmlfluss.XmlRecord
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(@XmlText val xs: List<String>)
             """.trimIndent(),
         )
@@ -230,8 +230,8 @@ class XmlDslProcessorErrorTest {
             import xmlfluss.XmlChild
             import xmlfluss.XmlRecord
 
-            @XmlRecord("//doc")
-            class Doc(@XmlChild("x") val x: String)
+            @XmlRecord(path = "//doc")
+            class Doc(@XmlChild(path = "x") val x: String)
             """.trimIndent(),
         )
         assertFailsWith(src, "@XmlRecord requires data class")
@@ -246,7 +246,7 @@ class XmlDslProcessorErrorTest {
             import xmlfluss.XmlMap
             import xmlfluss.XmlRecord
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Foo(
                 @XmlMap(entry = "e", key = ".", value = "v")
                 val m: Map<Map<String, String>, String>,
@@ -273,9 +273,9 @@ class XmlDslProcessorErrorTest {
                 override fun convert(raw: String, loc: Location): String = raw
             }
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
-                @XmlChild("d")
+                @XmlChild(path = "d")
                 @XmlFormat(pattern = "yyyy")
                 @XmlConverter(cls = MyConv::class)
                 val d: String,
@@ -294,9 +294,9 @@ class XmlDslProcessorErrorTest {
             import xmlfluss.XmlChild
             import xmlfluss.XmlRecord
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
-                @XmlChild("x") val x: String,
+                @XmlChild(path = "x") val x: String,
                 val y: String,
             )
             """.trimIndent(),
@@ -316,10 +316,10 @@ class XmlDslProcessorErrorTest {
 
             data class Inner(@XmlText val body: String)
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
-                @XmlChild("x") val x: String,
-                @XmlChild("x") val xn: Inner,
+                @XmlChild(path = "x") val x: String,
+                @XmlChild(path = "x") val xn: Inner,
             )
             """.trimIndent(),
         )
@@ -335,10 +335,10 @@ class XmlDslProcessorErrorTest {
             import xmlfluss.XmlChild
             import xmlfluss.XmlRecord
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
-                @XmlChild("x") val a: String,
-                @XmlChild("x") val b: String,
+                @XmlChild(path = "x") val a: String,
+                @XmlChild(path = "x") val b: String,
             )
             """.trimIndent(),
         )
@@ -358,10 +358,10 @@ class XmlDslProcessorErrorTest {
             data class A(@XmlText val v: String)
             data class B(@XmlText val v: String)
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
-                @XmlChild("x") val a: A,
-                @XmlChild("x") val b: B,
+                @XmlChild(path = "x") val a: A,
+                @XmlChild(path = "x") val b: B,
             )
             """.trimIndent(),
         )
@@ -380,10 +380,10 @@ class XmlDslProcessorErrorTest {
 
             data class A(@XmlText val v: String)
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
-                @XmlChild("x") val a: A,
-                @XmlChild("x") val xs: List<A>,
+                @XmlChild(path = "x") val a: A,
+                @XmlChild(path = "x") val xs: List<A>,
             )
             """.trimIndent(),
         )
@@ -399,8 +399,8 @@ class XmlDslProcessorErrorTest {
             import xmlfluss.XmlChild
             import xmlfluss.XmlRecord
 
-            @XmlRecord("//doc")
-            data class Doc(@XmlChild("foo:bar") val v: String)
+            @XmlRecord(path = "//doc")
+            data class Doc(@XmlChild(path = "foo:bar") val v: String)
             """.trimIndent(),
         )
         assertFailsWith(src, "unbound NS prefix 'foo'")
@@ -417,8 +417,8 @@ class XmlDslProcessorErrorTest {
             import xmlfluss.XmlRecord
 
             @XmlNs(prefix = "p", uri = "urn:p")
-            @XmlRecord("//doc")
-            data class Doc(@XmlChild("p:") val v: String)
+            @XmlRecord(path = "//doc")
+            data class Doc(@XmlChild(path = "p:") val v: String)
             """.trimIndent(),
         )
         assertFailsWith(src, "bad qname")
@@ -433,10 +433,10 @@ class XmlDslProcessorErrorTest {
             import xmlfluss.XmlChild
             import xmlfluss.XmlRecord
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
-                @XmlChild("x") val a: String,
-                @XmlChild("//x") val b: String,
+                @XmlChild(path = "x") val a: String,
+                @XmlChild(path = "//x") val b: String,
             )
             """.trimIndent(),
         )
@@ -453,9 +453,9 @@ class XmlDslProcessorErrorTest {
             import xmlfluss.XmlMap
             import xmlfluss.XmlRecord
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
-                @XmlChild("e") val s: String,
+                @XmlChild(path = "e") val s: String,
                 @XmlMap(entry = "e", key = "@k", value = ".") val m: Map<String, String>,
             )
             """.trimIndent(),
@@ -472,8 +472,8 @@ class XmlDslProcessorErrorTest {
             import xmlfluss.XmlChild
             import xmlfluss.XmlRecord
 
-            @XmlRecord("//doc")
-            data class Doc(@XmlChild("x") val xs: List<String>?)
+            @XmlRecord(path = "//doc")
+            data class Doc(@XmlChild(path = "x") val xs: List<String>?)
             """.trimIndent(),
         )
         assertFailsWith(src, "must not be nullable")
@@ -489,8 +489,8 @@ class XmlDslProcessorErrorTest {
             import xmlfluss.XmlChild
             import xmlfluss.XmlRecord
 
-            @XmlRecord("//doc")
-            data class Doc(@XmlAttr @XmlChild("x") val v: String)
+            @XmlRecord(path = "//doc")
+            data class Doc(@XmlAttr @XmlChild(path = "x") val v: String)
             """.trimIndent(),
         )
         assertFailsWith(src, "multiple xml bindings")
@@ -505,8 +505,8 @@ class XmlDslProcessorErrorTest {
             import xmlfluss.XmlChild
             import xmlfluss.XmlRecord
 
-            @XmlRecord("//doc")
-            data class Doc(@XmlChild("m") val m: Map<String, String>)
+            @XmlRecord(path = "//doc")
+            data class Doc(@XmlChild(path = "m") val m: Map<String, String>)
             """.trimIndent(),
         )
         assertFailsWith(src, "lacks @XmlMap")
@@ -523,8 +523,8 @@ class XmlDslProcessorErrorTest {
 
             class NotData(val v: String)
 
-            @XmlRecord("//doc")
-            data class Doc(@XmlChild("v") val v: NotData)
+            @XmlRecord(path = "//doc")
+            data class Doc(@XmlChild(path = "v") val v: NotData)
             """.trimIndent(),
         )
         assertFailsWith(src, "Unsupported type")
@@ -548,7 +548,7 @@ class XmlDslProcessorErrorTest {
             @XmlSubtype(name = "circle")
             data class Circle(@XmlAttr val r: Int) : Shape()
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
                 @XmlChild @XmlFormat(pattern = "x") val s: Shape,
             )
@@ -569,8 +569,8 @@ class XmlDslProcessorErrorTest {
 
             data class Inner(@XmlText val v: String)
 
-            @XmlRecord("//doc")
-            data class Doc(@XmlAttr("x") val x: Inner)
+            @XmlRecord(path = "//doc")
+            data class Doc(@XmlAttr(name = "x") val x: Inner)
             """.trimIndent(),
         )
         assertFailsWith(src, "Nested data-class field 'x' must use @XmlChild")
@@ -585,7 +585,7 @@ class XmlDslProcessorErrorTest {
             import xmlfluss.XmlMap
             import xmlfluss.XmlRecord
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
                 @XmlMap(entry = "e", key = "@k", value = "v")
                 val m: Map<String, List<String?>>,
@@ -608,7 +608,7 @@ class XmlDslProcessorErrorTest {
 
             data class Detail(@XmlAttr val k: String, @XmlText val v: String)
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
                 @XmlMap(entry = "e", key = "@k", value = "@v")
                 val m: Map<String, Detail>,
@@ -629,7 +629,7 @@ class XmlDslProcessorErrorTest {
 
             class NotData(val v: String)
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
                 @XmlMap(entry = "e", key = "@k", value = ".")
                 val m: Map<String, NotData>,
@@ -654,8 +654,8 @@ class XmlDslProcessorErrorTest {
                 @XmlText val b: String,
             )
 
-            @XmlRecord("//doc")
-            data class Doc(@XmlChild("inner") val inner: Inner)
+            @XmlRecord(path = "//doc")
+            data class Doc(@XmlChild(path = "inner") val inner: Inner)
             """.trimIndent(),
         )
         assertFailsWith(src, "multiple @XmlText fields not allowed")
@@ -670,8 +670,8 @@ class XmlDslProcessorErrorTest {
             import xmlfluss.XmlChild
             import xmlfluss.XmlRecord
 
-            @XmlRecord("//doc")
-            data class Doc(@XmlChild("/foo") val x: String)
+            @XmlRecord(path = "//doc")
+            data class Doc(@XmlChild(path = "/foo") val x: String)
             """.trimIndent(),
         )
         assertFailsWith(src, "invalid syntax")
@@ -686,8 +686,8 @@ class XmlDslProcessorErrorTest {
             import xmlfluss.XmlChild
             import xmlfluss.XmlRecord
 
-            @XmlRecord("//doc")
-            data class Doc(@XmlChild("//@x") val x: String)
+            @XmlRecord(path = "//doc")
+            data class Doc(@XmlChild(path = "//@x") val x: String)
             """.trimIndent(),
         )
         assertFailsWith(src, "descendant axis head must be an element")
@@ -706,7 +706,7 @@ class XmlDslProcessorErrorTest {
             @XmlPolymorphic
             sealed class Shape
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(@XmlChild val s: Shape)
             """.trimIndent(),
         )
@@ -729,7 +729,7 @@ class XmlDslProcessorErrorTest {
             @XmlSubtype(name = "circle")
             class Circle : Shape()
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(@XmlChild val s: Shape)
             """.trimIndent(),
         )
@@ -750,10 +750,10 @@ class XmlDslProcessorErrorTest {
             @XmlPolymorphic
             sealed class Shape
             @XmlSubtype(name = "circle")
-            data class Circle(@XmlChild("r") val r: Int) : Shape()
-            data class Naked(@XmlChild("n") val n: Int) : Shape()
+            data class Circle(@XmlChild(path = "r") val r: Int) : Shape()
+            data class Naked(@XmlChild(path = "n") val n: Int) : Shape()
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(@XmlChild val s: Shape)
             """.trimIndent(),
         )
@@ -777,8 +777,8 @@ class XmlDslProcessorErrorTest {
             @XmlSubtype(name = "circle")
             data class Circle(@XmlAttr val r: Int) : Shape()
 
-            @XmlRecord("//doc")
-            data class Doc(@XmlChild("shape") val s: Shape)
+            @XmlRecord(path = "//doc")
+            data class Doc(@XmlChild(path = "shape") val s: Shape)
             """.trimIndent(),
         )
         assertFailsWith(src, "tag-mode @XmlChild path must be empty")
@@ -801,8 +801,8 @@ class XmlDslProcessorErrorTest {
             @XmlSubtype(name = "circle")
             data class Circle(@XmlAttr val r: Int) : Shape()
 
-            @XmlRecord("//doc")
-            data class Doc(@XmlChild("shape") val s: Shape)
+            @XmlRecord(path = "//doc")
+            data class Doc(@XmlChild(path = "shape") val s: Shape)
             """.trimIndent(),
         )
         assertFailsWith(src, "bad discriminator")
@@ -825,8 +825,8 @@ class XmlDslProcessorErrorTest {
             @XmlSubtype(name = "circle")
             data class Circle(@XmlAttr val r: Int) : Shape()
 
-            @XmlRecord("//doc")
-            data class Doc(@XmlChild("wrap/shape") val s: Shape)
+            @XmlRecord(path = "//doc")
+            data class Doc(@XmlChild(path = "wrap/shape") val s: Shape)
             """.trimIndent(),
         )
         assertFailsWith(src, "attr-mode @XmlChild path must be a single direct-child element")
@@ -842,7 +842,7 @@ class XmlDslProcessorErrorTest {
             import xmlfluss.XmlMap
             import xmlfluss.XmlRecord
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
                 @XmlMap(entry = "e", key = "@k", value = ".")
                 @XmlFormat(pattern = "yyyy")

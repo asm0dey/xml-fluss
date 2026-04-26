@@ -4,8 +4,8 @@ import xmlfluss.XmlAttr
 import xmlfluss.XmlChild
 import xmlfluss.XmlRecord
 
-@XmlRecord("//author[@role='main']")
+@XmlRecord(path = "//author[@role='main']")
 data class MainAuthor(
-    @XmlAttr("role") val role: String,
-    @XmlChild("name") val name: String,
+    @XmlAttr(name = "role") val role: String,
+    @XmlChild(path = "name") val name: String,
 )

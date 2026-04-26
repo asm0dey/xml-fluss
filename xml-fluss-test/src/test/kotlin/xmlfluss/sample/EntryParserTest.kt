@@ -2,7 +2,6 @@ package xmlfluss.sample
 
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
-import xmlfluss.XmlParseException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith

@@ -1,14 +1,6 @@
 package xmlfluss.sample
 
-import xmlfluss.Converter
-import xmlfluss.Location
-import xmlfluss.XmlAttr
-import xmlfluss.XmlChild
-import xmlfluss.XmlConverter
-import xmlfluss.XmlFormat
-import xmlfluss.XmlParseException
-import xmlfluss.XmlRecord
-import xmlfluss.XmlText
+import xmlfluss.*
 import java.math.BigDecimal
 import java.time.LocalDate
 
@@ -24,14 +16,14 @@ class MoneyConverter : Converter<Money> {
     }
 }
 
-@XmlRecord("//item")
+@XmlRecord(path = "//item")
 data class Item(
-    @XmlAttr("id") val id: Int,
-    @XmlChild("name") val name: String,
-    @XmlChild("tag") val tags: List<String>,
-    @XmlChild("meta/lang") val lang: String?,
-    @XmlChild("info/@kind") val kind: String?,
-    @XmlChild("published") @XmlFormat("yyyy-MM-dd") val published: LocalDate,
-    @XmlChild("price") @XmlConverter(MoneyConverter::class) val price: Money,
+    @XmlAttr(name = "id") val id: Int,
+    @XmlChild(path = "name") val name: String,
+    @XmlChild(path = "tag") val tags: List<String>,
+    @XmlChild(path = "meta/lang") val lang: String?,
+    @XmlChild(path = "info/@kind") val kind: String?,
+    @XmlChild(path = "published") @XmlFormat(pattern = "yyyy-MM-dd") val published: LocalDate,
+    @XmlChild(path = "price") @XmlConverter(cls = MoneyConverter::class) val price: Money,
     @XmlText val raw: String,
 )

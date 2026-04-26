@@ -1,49 +1,45 @@
 package xmlfluss.sample
 
-import xmlfluss.XmlAttr
-import xmlfluss.XmlChild
-import xmlfluss.XmlMap
-import xmlfluss.XmlNs
-import xmlfluss.XmlRecord
+import xmlfluss.*
 
-@XmlRecord("//note")
-@XmlNs("xml", "http://www.w3.org/XML/1998/namespace")
-@XmlNs("x", "http://example.com/x")
+@XmlRecord(path = "//note")
+@XmlNs(prefix = "xml", uri = "http://www.w3.org/XML/1998/namespace")
+@XmlNs(prefix = "x", uri = "http://example.com/x")
 data class Note(
-    @XmlAttr("id") val id: String,
-    @XmlAttr("xml:lang") val lang: String,
-    @XmlAttr("x:tag") val tag: String?,
-    @XmlChild("body") val body: String,
+    @XmlAttr(name = "id") val id: String,
+    @XmlAttr(name = "xml:lang") val lang: String,
+    @XmlAttr(name = "x:tag") val tag: String?,
+    @XmlChild(path = "body") val body: String,
 )
 
 data class Para(
-    @XmlAttr("xml:lang") val lang: String,
-    @XmlAttr("x:role") val role: String?,
-    @XmlChild("text") val text: String,
+    @XmlAttr(name = "xml:lang") val lang: String,
+    @XmlAttr(name = "x:role") val role: String?,
+    @XmlChild(path = "text") val text: String,
 )
 
 // Root of this nested type lives in the 'x' namespace inherited from Doc.
 // Children stay in null NS unless prefixed.
 data class Sticker(
-    @XmlAttr("id") val id: String,
-    @XmlChild("x:label") val label: String,
+    @XmlAttr(name = "id") val id: String,
+    @XmlChild(path = "x:label") val label: String,
 )
 
-@XmlRecord("//x:feed")
-@XmlNs("xml", "http://www.w3.org/XML/1998/namespace")
-@XmlNs("x", "http://example.com/x")
+@XmlRecord(path = "//x:feed")
+@XmlNs(prefix = "xml", uri = "http://www.w3.org/XML/1998/namespace")
+@XmlNs(prefix = "x", uri = "http://example.com/x")
 data class Feed(
-    @XmlAttr("id") val id: String,
+    @XmlAttr(name = "id") val id: String,
 )
 
-@XmlRecord("//doc")
-@XmlNs("xml", "http://www.w3.org/XML/1998/namespace")
-@XmlNs("x", "http://example.com/x")
+@XmlRecord(path = "//doc")
+@XmlNs(prefix = "xml", uri = "http://www.w3.org/XML/1998/namespace")
+@XmlNs(prefix = "x", uri = "http://example.com/x")
 data class Doc(
-    @XmlAttr("id") val id: String,
-    @XmlChild("para") val paras: List<Para>,
-    @XmlChild("x:sticker") val stickers: List<Sticker>,
-    @XmlChild("title/@xml:lang") val titleLang: String,
-    @XmlChild("meta/inner/@x:flag") val innerFlag: String?,
+    @XmlAttr(name = "id") val id: String,
+    @XmlChild(path = "para") val paras: List<Para>,
+    @XmlChild(path = "x:sticker") val stickers: List<Sticker>,
+    @XmlChild(path = "title/@xml:lang") val titleLang: String,
+    @XmlChild(path = "meta/inner/@x:flag") val innerFlag: String?,
     @XmlMap(entry = "trans", key = "@xml:lang", value = "@x:val") val translations: Map<String, String>,
 )

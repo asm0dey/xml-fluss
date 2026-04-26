@@ -9,7 +9,7 @@ import com.google.devtools.ksp.processing.SymbolProcessorProvider
  *
  * ```kotlin
  * dependencies {
- *     ksp("io.example:xml-dsl-ksp:VERSION")
+ *     ksp("site.asm0dey.xmlfluss:xml-fluss-ksp:VERSION")
  * }
  * ```
  *

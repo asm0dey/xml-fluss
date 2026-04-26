@@ -1,34 +1,28 @@
 package xmlfluss.sample
 
-import xmlfluss.XmlAttr
-import xmlfluss.XmlChild
-import xmlfluss.XmlConverter
-import xmlfluss.XmlFormat
-import xmlfluss.XmlNs
-import xmlfluss.XmlRecord
-import xmlfluss.XmlText
+import xmlfluss.*
 import java.math.BigDecimal
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
 
-@XmlRecord("//book[@featured='true']")
-@XmlNs("dc", "http://purl.org/dc/elements/1.1/")
+@XmlRecord(path = "//book[@featured='true']")
+@XmlNs(prefix = "dc", uri = "http://purl.org/dc/elements/1.1/")
 data class Book(
-    @XmlAttr("id") val id: Int,
-    @XmlAttr("featured") val featured: Boolean,
-    @XmlAttr("isbn") val isbn: String?,
-    @XmlChild("title") val title: String,
-    @XmlChild("subtitle") val subtitle: String?,
-    @XmlChild("pages") val pages: Long,
-    @XmlChild("rating") val rating: Double,
-    @XmlChild("inPrint") val inPrint: Boolean,
-    @XmlChild("dc:tags/dc:tag") val tags: List<String>,
-    @XmlChild("meta/published") @XmlFormat("yyyy-MM-dd") val published: LocalDate,
-    @XmlChild("meta/updatedAt") val updatedAt: LocalDateTime,
-    @XmlChild("meta/indexedAt") val indexedAt: Instant,
-    @XmlChild("price") @XmlConverter(MoneyConverter::class) val price: Money,
-    @XmlChild("price/@currency") val currency: String,
-    @XmlChild("totalSales") val totalSales: BigDecimal,
+    @XmlAttr(name = "id") val id: Int,
+    @XmlAttr(name = "featured") val featured: Boolean,
+    @XmlAttr(name = "isbn") val isbn: String?,
+    @XmlChild(path = "title") val title: String,
+    @XmlChild(path = "subtitle") val subtitle: String?,
+    @XmlChild(path = "pages") val pages: Long,
+    @XmlChild(path = "rating") val rating: Double,
+    @XmlChild(path = "inPrint") val inPrint: Boolean,
+    @XmlChild(path = "dc:tags/dc:tag") val tags: List<String>,
+    @XmlChild(path = "meta/published") @XmlFormat(pattern = "yyyy-MM-dd") val published: LocalDate,
+    @XmlChild(path = "meta/updatedAt") val updatedAt: LocalDateTime,
+    @XmlChild(path = "meta/indexedAt") val indexedAt: Instant,
+    @XmlChild(path = "price") @XmlConverter(cls = MoneyConverter::class) val price: Money,
+    @XmlChild(path = "price/@currency") val currency: String,
+    @XmlChild(path = "totalSales") val totalSales: BigDecimal,
     @XmlText val raw: String,
 )

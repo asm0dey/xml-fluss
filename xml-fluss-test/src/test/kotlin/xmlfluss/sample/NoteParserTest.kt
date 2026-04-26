@@ -98,7 +98,7 @@ class NoteParserTest {
 
     @Test
     fun recordRootInNamespace() = runTest {
-        // @XmlRecord("//x:feed") — record root itself namespaced; null-NS <feed> ignored.
+        // @XmlRecord(path = "//x:feed") — record root itself namespaced; null-NS <feed> ignored.
         val xml = """
             <root xmlns:x="http://example.com/x">
               <feed id="ghost"/>

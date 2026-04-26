@@ -9,7 +9,7 @@ data class Knob(
     @XmlChild val label: String,
 )
 
-@XmlRecord("//widget")
+@XmlRecord(path = "//widget")
 data class Widget(
     @XmlAttr val id: String,
     @XmlAttr val color: String?,

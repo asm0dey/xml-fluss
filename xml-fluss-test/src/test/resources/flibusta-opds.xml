@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
- <feed xmlns="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/terms/" xmlns:os="http://a9.com/-/spec/opensearch/1.1/" xmlns:opds="http://opds-spec.org/2010/catalog"> <id>tag:root</id>
+<feed xmlns="http://www.w3.org/2005/Atom"> <id>tag:root</id>
  <title>Flibusta catalog</title>
  <updated>2026-04-24T15:31:46+02:00</updated>
  <icon>/favicon.ico</icon>

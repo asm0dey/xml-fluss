@@ -20,11 +20,11 @@ class CycleDetectionTest {
             import xmlfluss.XmlChild
             import xmlfluss.XmlRecord
 
-            data class A(@XmlChild("b") val b: B)
-            data class B(@XmlChild("a") val a: A)
+            data class A(@XmlChild(path = "b") val b: B)
+            data class B(@XmlChild(path = "a") val a: A)
 
-            @XmlRecord("//root")
-            data class Root(@XmlChild("a") val a: A)
+            @XmlRecord(path = "//root")
+            data class Root(@XmlChild(path = "a") val a: A)
             """.trimIndent(),
         )
 

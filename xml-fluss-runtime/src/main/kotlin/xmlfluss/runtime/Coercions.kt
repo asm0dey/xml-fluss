@@ -2,6 +2,8 @@ package xmlfluss.runtime
 
 import xmlfluss.Location
 import xmlfluss.XmlParseException
+import xmlfluss.runtime.Coercions.requireString
+import xmlfluss.runtime.Coercions.toLocalDate
 import java.math.BigDecimal
 import java.text.DecimalFormat
 import java.text.ParsePosition

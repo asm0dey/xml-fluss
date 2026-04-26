@@ -40,16 +40,16 @@ class XmlDslProcessorPositiveTest {
             import xmlfluss.XmlRecord
             import xmlfluss.XmlText
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Inner(@XmlText val body: String)
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
-                @XmlAttr("id") val id: String,
+                @XmlAttr(name = "id") val id: String,
                 @XmlAttr val href: String,
-                @XmlChild("title") val title: String,
+                @XmlChild(path = "title") val title: String,
                 @XmlChild val name: String,
-                @XmlChild("inner") val inner: Inner,
+                @XmlChild(path = "inner") val inner: Inner,
             )
             """.trimIndent(),
         )
@@ -70,16 +70,16 @@ class XmlDslProcessorPositiveTest {
             import java.time.LocalDate
             import java.time.LocalDateTime
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
-                @XmlChild("i") val i: Int,
-                @XmlChild("l") val l: Long,
-                @XmlChild("d") val d: Double,
-                @XmlChild("b") val b: Boolean,
-                @XmlChild("ld") @XmlFormat(pattern = "yyyy-MM-dd") val ld: LocalDate,
-                @XmlChild("ldt") @XmlFormat(pattern = "yyyy-MM-dd'T'HH:mm:ss") val ldt: LocalDateTime,
-                @XmlChild("inst") val inst: Instant,
-                @XmlChild("amount") @XmlFormat(pattern = "#,##0.00") val amount: BigDecimal,
+                @XmlChild(path = "i") val i: Int,
+                @XmlChild(path = "l") val l: Long,
+                @XmlChild(path = "d") val d: Double,
+                @XmlChild(path = "b") val b: Boolean,
+                @XmlChild(path = "ld") @XmlFormat(pattern = "yyyy-MM-dd") val ld: LocalDate,
+                @XmlChild(path = "ldt") @XmlFormat(pattern = "yyyy-MM-dd'T'HH:mm:ss") val ldt: LocalDateTime,
+                @XmlChild(path = "inst") val inst: Instant,
+                @XmlChild(path = "amount") @XmlFormat(pattern = "#,##0.00") val amount: BigDecimal,
             )
             """.trimIndent(),
         )
@@ -104,10 +104,10 @@ class XmlDslProcessorPositiveTest {
                 override fun convert(raw: String, loc: Location): Currency = Currency(raw.trim())
             }
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
-                @XmlChild("c") @XmlConverter(CurrencyConverter::class) val c: Currency,
-                @XmlChild("c2") @XmlConverter(CurrencyConverter::class) val c2: Currency,
+                @XmlChild(path = "c") @XmlConverter(cls = CurrencyConverter::class) val c: Currency,
+                @XmlChild(path = "c2") @XmlConverter(cls = CurrencyConverter::class) val c2: Currency,
             )
             """.trimIndent(),
         )
@@ -123,10 +123,10 @@ class XmlDslProcessorPositiveTest {
             import xmlfluss.XmlChild
             import xmlfluss.XmlRecord
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
-                @XmlChild("addr/@code") val code: String,
-                @XmlChild("nested/inner/@id") val id: String,
+                @XmlChild(path = "addr/@code") val code: String,
+                @XmlChild(path = "nested/inner/@id") val id: String,
             )
             """.trimIndent(),
         )
@@ -146,12 +146,12 @@ class XmlDslProcessorPositiveTest {
 
             data class Author(@XmlAttr val name: String, @XmlText val bio: String)
 
-            @XmlRecord("//book")
+            @XmlRecord(path = "//book")
             data class Book(
-                @XmlChild("title") val title: String,
-                @XmlChild("author") val authors: List<Author>,
-                @XmlChild("tag") val tags: List<String>,
-                @XmlChild("opt") val opt: String?,
+                @XmlChild(path = "title") val title: String,
+                @XmlChild(path = "author") val authors: List<Author>,
+                @XmlChild(path = "tag") val tags: List<String>,
+                @XmlChild(path = "opt") val opt: String?,
             )
             """.trimIndent(),
         )
@@ -167,10 +167,10 @@ class XmlDslProcessorPositiveTest {
             import xmlfluss.XmlChild
             import xmlfluss.XmlRecord
 
-            @XmlRecord("//feed")
+            @XmlRecord(path = "//feed")
             data class Feed(
-                @XmlChild("//title") val deepTitle: String,
-                @XmlChild("//entry") val entries: List<String>,
+                @XmlChild(path = "//title") val deepTitle: String,
+                @XmlChild(path = "//entry") val entries: List<String>,
             )
             """.trimIndent(),
         )
@@ -196,7 +196,7 @@ class XmlDslProcessorPositiveTest {
             @XmlSubtype(name = "square")
             data class Square(@XmlAttr val side: Int) : Shape()
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
                 @XmlChild val one: Shape,
             )
@@ -224,7 +224,7 @@ class XmlDslProcessorPositiveTest {
             @XmlSubtype(name = "square")
             data class Square(@XmlAttr val side: Int) : Shape()
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
                 @XmlChild val many: List<Shape>,
             )
@@ -252,9 +252,9 @@ class XmlDslProcessorPositiveTest {
             @XmlSubtype(name = "square")
             data class Square(@XmlAttr val side: Int) : Shape()
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
-                @XmlChild("shape") val shape: Shape,
+                @XmlChild(path = "shape") val shape: Shape,
             )
             """.trimIndent(),
         )
@@ -270,7 +270,7 @@ class XmlDslProcessorPositiveTest {
             import xmlfluss.XmlMap
             import xmlfluss.XmlRecord
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
                 @XmlMap(entry = "score", key = "@k", value = ".") val s: Map<String, String>,
                 @XmlMap(entry = "tag", key = "@k", value = "@v") val t: Map<String, String>,
@@ -294,10 +294,10 @@ class XmlDslProcessorPositiveTest {
 
             @XmlNs(prefix = "atom", uri = "http://www.w3.org/2005/Atom")
             @XmlNs(prefix = "x", uri = "urn:x")
-            @XmlRecord("//atom:entry")
+            @XmlRecord(path = "//atom:entry")
             data class Entry(
-                @XmlAttr("x:id") val xid: String,
-                @XmlChild("atom:title") val title: String,
+                @XmlAttr(name = "x:id") val xid: String,
+                @XmlChild(path = "atom:title") val title: String,
             )
             """.trimIndent(),
         )
@@ -317,13 +317,13 @@ class XmlDslProcessorPositiveTest {
             import java.math.BigDecimal
             import java.time.LocalDate
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
-                @XmlAttr("opt") val opt: String?,
-                @XmlAttr("n") val n: Int?,
-                @XmlChild("title") val title: String?,
-                @XmlChild("ld") @XmlFormat(pattern = "yyyy-MM-dd") val ld: LocalDate?,
-                @XmlChild("amt") val amt: BigDecimal?,
+                @XmlAttr(name = "opt") val opt: String?,
+                @XmlAttr(name = "n") val n: Int?,
+                @XmlChild(path = "title") val title: String?,
+                @XmlChild(path = "ld") @XmlFormat(pattern = "yyyy-MM-dd") val ld: LocalDate?,
+                @XmlChild(path = "amt") val amt: BigDecimal?,
             )
             """.trimIndent(),
         )
@@ -343,11 +343,11 @@ class XmlDslProcessorPositiveTest {
 
             data class Author(@XmlAttr val name: String, @XmlText val bio: String)
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
-                @XmlChild("//author") val authors: List<Author>,
-                @XmlChild("//meta/timestamp") val ts: String,
-                @XmlChild("//note") val note: Author?,
+                @XmlChild(path = "//author") val authors: List<Author>,
+                @XmlChild(path = "//meta/timestamp") val ts: String,
+                @XmlChild(path = "//note") val note: Author?,
             )
             """.trimIndent(),
         )
@@ -367,7 +367,7 @@ class XmlDslProcessorPositiveTest {
 
             data class Detail(@XmlAttr val k: String, @XmlText val v: String)
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
                 @XmlMap(entry = "tag", key = "@k", value = ".") val m: Map<String, Detail>,
             )
@@ -392,10 +392,10 @@ class XmlDslProcessorPositiveTest {
                 @XmlText(preserveWhitespace = true) val body: String,
             )
 
-            @XmlRecord("//doc")
+            @XmlRecord(path = "//doc")
             data class Doc(
-                @XmlChild("a") val a: Inner,
-                @XmlChild("b") val b: Inner?,
+                @XmlChild(path = "a") val a: Inner,
+                @XmlChild(path = "b") val b: Inner?,
             )
             """.trimIndent(),
         )

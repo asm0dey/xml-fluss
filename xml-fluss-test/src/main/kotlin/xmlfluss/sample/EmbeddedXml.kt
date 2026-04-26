@@ -4,14 +4,14 @@ import xmlfluss.XmlAttr
 import xmlfluss.XmlChild
 import xmlfluss.XmlRecord
 
-@XmlRecord("//envelope")
+@XmlRecord(path = "//envelope")
 data class Envelope(
-    @XmlAttr("id") val id: String,
-    @XmlChild("payload") val payload: String,
+    @XmlAttr(name = "id") val id: String,
+    @XmlChild(path = "payload") val payload: String,
 )
 
-@XmlRecord("//msg")
+@XmlRecord(path = "//msg")
 data class EmbeddedMsg(
-    @XmlAttr("id") val id: String,
-    @XmlChild("body") val body: String,
+    @XmlAttr(name = "id") val id: String,
+    @XmlChild(path = "body") val body: String,
 )

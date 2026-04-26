@@ -20,10 +20,10 @@ class HeadCollisionTest {
             import xmlfluss.XmlChild
             import xmlfluss.XmlRecord
 
-            @XmlRecord("//foo")
+            @XmlRecord(path = "//foo")
             data class Foo(
-                @XmlChild("bar") val a: String,
-                @XmlChild("//bar") val b: String,
+                @XmlChild(path = "bar") val a: String,
+                @XmlChild(path = "//bar") val b: String,
             )
             """.trimIndent(),
         )

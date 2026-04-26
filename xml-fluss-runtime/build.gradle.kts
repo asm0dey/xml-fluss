@@ -10,6 +10,7 @@ kotlin {
 dependencies {
     api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
     api("com.fasterxml:aalto-xml:1.3.4")
+    api("org.jspecify:jspecify:1.0.0")
 
     testImplementation("org.junit.jupiter:junit-jupiter:6.0.3")
     testImplementation(kotlin("test-junit5"))

@@ -1,11 +1,6 @@
 package xmlfluss.path
 
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
-import kotlin.test.assertNotNull
-import kotlin.test.assertNull
-import kotlin.test.assertTrue
+import kotlin.test.*
 
 class PathParserTest {
     private fun parse(expr: String, ns: Map<String, String> = emptyMap()): CompiledPath =

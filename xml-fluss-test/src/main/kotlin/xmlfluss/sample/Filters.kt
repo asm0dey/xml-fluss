@@ -5,36 +5,36 @@ import xmlfluss.XmlChild
 import xmlfluss.XmlNs
 import xmlfluss.XmlRecord
 
-@XmlRecord("//author[@role!='main']")
+@XmlRecord(path = "//author[@role!='main']")
 data class NotMainAuthor(
-    @XmlAttr("role") val role: String,
-    @XmlChild("name") val name: String,
+    @XmlAttr(name = "role") val role: String,
+    @XmlChild(path = "name") val name: String,
 )
 
-@XmlRecord("//author[@role='main' and @active='true']")
+@XmlRecord(path = "//author[@role='main' and @active='true']")
 data class ActiveMainAuthor(
-    @XmlChild("name") val name: String,
+    @XmlChild(path = "name") val name: String,
 )
 
-@XmlRecord("//author[@role='main' or @role='editor']")
+@XmlRecord(path = "//author[@role='main' or @role='editor']")
 data class MainOrEditor(
-    @XmlAttr("role") val role: String,
-    @XmlChild("name") val name: String,
+    @XmlAttr(name = "role") val role: String,
+    @XmlChild(path = "name") val name: String,
 )
 
-@XmlRecord("//author[2]")
+@XmlRecord(path = "//author[2]")
 data class SecondAuthor(
-    @XmlChild("name") val name: String,
+    @XmlChild(path = "name") val name: String,
 )
 
-@XmlRecord("//note[@xml:lang='en']")
-@XmlNs("xml", "http://www.w3.org/XML/1998/namespace")
+@XmlRecord(path = "//note[@xml:lang='en']")
+@XmlNs(prefix = "xml", uri = "http://www.w3.org/XML/1998/namespace")
 data class EnglishNote(
-    @XmlChild("text") val text: String,
+    @XmlChild(path = "text") val text: String,
 )
 
-@XmlRecord("//note[@xml:lang!='en']")
-@XmlNs("xml", "http://www.w3.org/XML/1998/namespace")
+@XmlRecord(path = "//note[@xml:lang!='en']")
+@XmlNs(prefix = "xml", uri = "http://www.w3.org/XML/1998/namespace")
 data class NonEnglishNote(
-    @XmlChild("text") val text: String,
+    @XmlChild(path = "text") val text: String,
 )

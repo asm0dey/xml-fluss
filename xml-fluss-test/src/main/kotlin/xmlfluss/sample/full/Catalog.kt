@@ -1,11 +1,6 @@
 package xmlfluss.sample.full
 
-import xmlfluss.XmlAttr
-import xmlfluss.XmlChild
-import xmlfluss.XmlConverter
-import xmlfluss.XmlFormat
-import xmlfluss.XmlRecord
-import xmlfluss.XmlText
+import xmlfluss.*
 import xmlfluss.sample.Money
 import xmlfluss.sample.MoneyConverter
 import java.math.BigDecimal
@@ -14,42 +9,42 @@ import java.time.LocalDate
 import java.time.LocalDateTime
 
 data class Royalty(
-    @XmlAttr("currency") val currency: String,
+    @XmlAttr(name = "currency") val currency: String,
     @XmlText val amount: BigDecimal,
 )
 
 data class Agent(
-    @XmlAttr("id") val id: Int,
-    @XmlChild("name") val name: String,
+    @XmlAttr(name = "id") val id: Int,
+    @XmlChild(path = "name") val name: String,
 )
 
 data class Book(
-    @XmlAttr("isbn") val isbn: String,
-    @XmlAttr("featured") val featured: Boolean,
-    @XmlChild("title") val title: String,
-    @XmlChild("subtitle") val subtitle: String?,
-    @XmlChild("pages") val pages: Long,
-    @XmlChild("rating") val rating: Double,
-    @XmlChild("published") @XmlFormat("MM/dd/yyyy") val published: LocalDate,
-    @XmlChild("updated") val updated: LocalDateTime,
-    @XmlChild("indexed") val indexed: Instant,
-    @XmlChild("listPrice") @XmlConverter(MoneyConverter::class) val listPrice: Money,
-    @XmlChild("listPrice/@currency") val priceCurrency: String,
-    @XmlChild("totalSales") @XmlFormat("#,##0.00") val totalSales: BigDecimal,
-    @XmlChild("tag") val tags: List<String>,
-    @XmlChild("royalty") val royalty: Royalty,
+    @XmlAttr(name = "isbn") val isbn: String,
+    @XmlAttr(name = "featured") val featured: Boolean,
+    @XmlChild(path = "title") val title: String,
+    @XmlChild(path = "subtitle") val subtitle: String?,
+    @XmlChild(path = "pages") val pages: Long,
+    @XmlChild(path = "rating") val rating: Double,
+    @XmlChild(path = "published") @XmlFormat(pattern = "MM/dd/yyyy") val published: LocalDate,
+    @XmlChild(path = "updated") val updated: LocalDateTime,
+    @XmlChild(path = "indexed") val indexed: Instant,
+    @XmlChild(path = "listPrice") @XmlConverter(cls = MoneyConverter::class) val listPrice: Money,
+    @XmlChild(path = "listPrice/@currency") val priceCurrency: String,
+    @XmlChild(path = "totalSales") @XmlFormat(pattern = "#,##0.00") val totalSales: BigDecimal,
+    @XmlChild(path = "tag") val tags: List<String>,
+    @XmlChild(path = "royalty") val royalty: Royalty,
 )
 
 data class Author(
-    @XmlAttr("id") val id: Int,
-    @XmlChild("name") val name: String,
-    @XmlChild("country") val country: String?,
-    @XmlChild("agent") val agent: Agent?,
-    @XmlChild("//book") val books: List<Book>,
+    @XmlAttr(name = "id") val id: Int,
+    @XmlChild(path = "name") val name: String,
+    @XmlChild(path = "country") val country: String?,
+    @XmlChild(path = "agent") val agent: Agent?,
+    @XmlChild(path = "//book") val books: List<Book>,
 )
 
-@XmlRecord("//catalog")
+@XmlRecord(path = "//catalog")
 data class Catalog(
-    @XmlAttr("version") val version: Int,
-    @XmlChild("//author") val authors: List<Author>,
+    @XmlAttr(name = "version") val version: Int,
+    @XmlChild(path = "//author") val authors: List<Author>,
 )

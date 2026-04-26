@@ -1,21 +1,16 @@
 package xmlfluss.sample.poly
 
-import xmlfluss.XmlAttr
-import xmlfluss.XmlChild
-import xmlfluss.XmlPolymorphic
-import xmlfluss.XmlRecord
-import xmlfluss.XmlSubtype
-import xmlfluss.XmlText
+import xmlfluss.*
 
 @XmlPolymorphic
 sealed interface Shape {
-    @XmlSubtype("circle")
+    @XmlSubtype(name = "circle")
     data class Circle(@XmlAttr val r: Double) : Shape
 
-    @XmlSubtype("square")
+    @XmlSubtype(name = "square")
     data class Square(@XmlAttr val side: Double) : Shape
 
-    @XmlSubtype("triangle")
+    @XmlSubtype(name = "triangle")
     data class Triangle(
         @XmlAttr val base: Double,
         @XmlAttr val height: Double,
@@ -25,21 +20,21 @@ sealed interface Shape {
 
 @XmlPolymorphic(discriminator = "@type")
 sealed interface Event {
-    @XmlSubtype("login")
+    @XmlSubtype(name = "login")
     data class Login(
         @XmlAttr val user: String,
         @XmlText val msg: String,
     ) : Event
 
-    @XmlSubtype("logout")
+    @XmlSubtype(name = "logout")
     data class Logout(@XmlAttr val user: String) : Event
 }
 
-@XmlRecord("//drawing")
+@XmlRecord(path = "//drawing")
 data class Drawing(
     @XmlAttr val id: Int,
     @XmlChild val shapes: List<Shape>,
-    @XmlChild("event") val events: List<Event>,
-    @XmlChild("highlight") val highlight: Event?,
-    @XmlChild("primary") val primary: Event,
+    @XmlChild(path = "event") val events: List<Event>,
+    @XmlChild(path = "highlight") val highlight: Event?,
+    @XmlChild(path = "primary") val primary: Event,
 )

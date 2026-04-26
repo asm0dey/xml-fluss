@@ -6,14 +6,14 @@ import xmlfluss.XmlMap
 import xmlfluss.XmlRecord
 
 data class StockItem(
-    @XmlAttr("id") val id: Int,
-    @XmlChild("name") val name: String,
-    @XmlChild("qty") val qty: Int,
+    @XmlAttr(name = "id") val id: Int,
+    @XmlChild(path = "name") val name: String,
+    @XmlChild(path = "qty") val qty: Int,
 )
 
-@XmlRecord("//inventory")
+@XmlRecord(path = "//inventory")
 data class Inventory(
-    @XmlAttr("region") val region: String,
+    @XmlAttr(name = "region") val region: String,
     @XmlMap(entry = "label", key = "@k", value = "@v") val labels: Map<String, String>,
     @XmlMap(entry = "count", key = "@sku", value = "n") val counts: Map<String, Int>,
     @XmlMap(entry = "tag", key = "@cat", value = "name") val tags: Map<String, List<String>>,
@@ -25,8 +25,8 @@ data class Inventory(
     @XmlMap(entry = "rev", key = "@k", value = "v") val nullableKeys: Map<String?, Int>,
     @XmlMap(entry = "slot", key = "@k", value = "stock") val nullableNested: Map<String, StockItem?>,
     @XmlMap(entry = "extra", key = "@k", value = "@v") val extras: Map<String, String>?,
-    @XmlChild("//report/title") val reportTitles: List<String>,
-    @XmlChild("//report/@code") val reportCodes: List<String>,
+    @XmlChild(path = "//report/title") val reportTitles: List<String>,
+    @XmlChild(path = "//report/@code") val reportCodes: List<String>,
     @XmlMap(entry = "summary", key = "//report/@code", value = "//report/title")
     val summaries: Map<List<String>, List<String>>,
 )

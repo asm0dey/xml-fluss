@@ -9,8 +9,8 @@ import xmlfluss.XmlText
  * empty, the generated parser binds an empty string, NOT null. Null is reserved
  * for genuinely-absent values (e.g. attributes that were never written).
  */
-@XmlRecord("//memo")
+@XmlRecord(path = "//memo")
 data class Memo(
-    @XmlAttr("id") val id: String,
+    @XmlAttr(name = "id") val id: String,
     @XmlText val body: String?,
 )

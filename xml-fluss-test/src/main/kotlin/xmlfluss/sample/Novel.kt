@@ -6,22 +6,22 @@ import xmlfluss.XmlRecord
 import xmlfluss.XmlText
 
 data class Person(
-    @XmlAttr("id") val id: Int,
-    @XmlChild("name") val name: String,
-    @XmlChild("country") val country: String?,
+    @XmlAttr(name = "id") val id: Int,
+    @XmlChild(path = "name") val name: String,
+    @XmlChild(path = "country") val country: String?,
 )
 
 data class Chapter(
-    @XmlAttr("n") val n: Int,
-    @XmlChild("title") val title: String,
+    @XmlAttr(name = "n") val n: Int,
+    @XmlChild(path = "title") val title: String,
     @XmlText val excerpt: String,
 )
 
-@XmlRecord("//novel")
+@XmlRecord(path = "//novel")
 data class Novel(
-    @XmlAttr("id") val id: Int,
-    @XmlChild("title") val title: String,
-    @XmlChild("author") val author: Person,
-    @XmlChild("editor") val editor: Person?,
-    @XmlChild("chapter") val chapters: List<Chapter>,
+    @XmlAttr(name = "id") val id: Int,
+    @XmlChild(path = "title") val title: String,
+    @XmlChild(path = "author") val author: Person,
+    @XmlChild(path = "editor") val editor: Person?,
+    @XmlChild(path = "chapter") val chapters: List<Chapter>,
 )

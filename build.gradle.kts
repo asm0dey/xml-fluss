@@ -9,7 +9,7 @@ plugins {
 
 allprojects {
     group = "site.asm0dey.xmlfluss"
-    version = "0.1.0"
+    version = providers.environmentVariable("RELEASE_VERSION").orElse("0.1.0-SNAPSHOT").get()
 
     repositories {
         mavenCentral()

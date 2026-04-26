@@ -1,9 +1,8 @@
 plugins {
-    kotlin("jvm") version "2.3.21" apply false
+    kotlin("jvm") apply false
     id("com.google.devtools.ksp") version "2.3.7" apply false
-    id("org.jetbrains.dokka") version "2.2.0" apply false
-    id("org.jetbrains.dokka-javadoc") version "2.2.0" apply false
-    id("com.vanniktech.maven.publish") version "0.36.0" apply false
+    id("org.jetbrains.dokka") apply false
+    id("org.jetbrains.dokka-javadoc") apply false
     `jacoco-report-aggregation`
 }
 
@@ -35,7 +34,7 @@ dependencies {
 reporting {
     @Suppress("UnstableApiUsage")
     reports {
-        val testCodeCoverageReport by creating(JacocoCoverageReport::class) {
+        @Suppress("unused") val testCodeCoverageReport by creating(JacocoCoverageReport::class) {
             testSuiteName.set("test")
         }
     }

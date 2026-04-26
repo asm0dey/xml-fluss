@@ -172,7 +172,7 @@ Path grammar:
 
 ```
 path       := ('//' | '/')? step ( ('/' | '//') step )* ('/@' qname)?
-step       := qname ('[' predicate ']')*           // chained brackets: implicit AND
+step       := qname ('[' predicate ']')*           // chained brackets: XPath order — filter, then index
 qname      := (ncname ':')? ncname
 predicate  := term (('and'|'or') term)*
 term       := '@' qname ('=' | '!=') quoted-string | integer
@@ -268,7 +268,7 @@ Combine terms using `and` or `or`. Parentheses are not currently supported, and 
 | Position | `integer` | `[1]` |
 | Logical AND | `and` | `[@a='1' and @b='2']` |
 | Logical OR | `or` | `[@a='1' or @a='2']` |
-| Chained brackets | `[a][b]` (implicit AND) | `[@kind='post'][2]` |
+| Chained brackets | `[a][b]` (XPath: filter, then index) | `[@kind='post'][2]` (2nd post) |
 | Namespaces | `prefix:attr` | `[@xml:lang='en']` |
 
 #### Streaming constraints
@@ -322,12 +322,12 @@ inside @XmlChild. Move the positional filter to @XmlRecord (e.g. @XmlRecord("//.
 or collect siblings into a List<T> field and pick by index in your code.
 ```
 
-Chained brackets (`step[a][b]`) compose with implicit AND in any path — `@XmlRecord`
-record paths or `@XmlChild` field paths. Note this is **not** standard XPath semantics:
-in XPath, `node[a][2]` filters by `a` first and takes the 2nd of the filtered set. xml-fluss
-treats `[a][2]` as `[a and 2]` — the position counter walks all same-named siblings, then
-the attribute filter applies. Use a single bracket with explicit `and` to keep the
-distinction explicit.
+Chained brackets (`step[a][b]`) follow standard XPath semantics: brackets evaluate left
+to right, and a positional check inside a later bracket counts only same-name siblings
+under the parent that already passed every earlier bracket. So `[@kind='post'][2]`
+means "the 2nd `<item>` carrying `kind='post'`" — not "the 2nd `<item>` overall, also
+a post". Inside `@XmlChild`, positional brackets remain rejected; chained attribute
+brackets there compose as a plain conjunction.
 
 ### 4. Scalars, temporals, BigDecimal
 

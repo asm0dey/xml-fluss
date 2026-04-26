@@ -50,7 +50,6 @@ class XmlReadCursor(
         val line: Int,
         val col: Int,
         val attrs: Map<QName, String>,
-        var nextChildIndex: Int = 1,
     )
 
     private val reader: XMLStreamReader = factory.createXMLStreamReader(input)
@@ -86,16 +85,12 @@ class XmlReadCursor(
 
     private fun handleStart(): Boolean {
         val qn = currentQName()
-        val parent = stack.lastOrNull()
-        val sibIdx = parent?.let { it.nextChildIndex.also { _ -> it.nextChildIndex++ } } ?: 1
         val attrs = captureAttrs()
         val (line, col) = wrapStax { reader.location.let { it.lineNumber to it.columnNumber } }
         stack.addLast(Frame(qn, line, col, attrs))
         val m = matcher.pushElement(
             qn,
-            { name -> attrs[if (ignoreNamespace) QName(null, name.local) else name] },
-            sibIdx,
-        )
+        ) { name -> attrs[if (ignoreNamespace) QName(null, name.local) else name] }
         if (m) atRecord = true
         return m
     }
@@ -138,8 +133,6 @@ class XmlReadCursor(
                 }
                 XMLStreamConstants.START_ELEMENT -> {
                     val qn = currentQName()
-                    val parent = stack.last()
-                    parent.nextChildIndex.also { parent.nextChildIndex++ }
                     val attrs = captureAttrs()
                     val (line, col) = wrapStax { reader.location.let { it.lineNumber to it.columnNumber } }
                     stack.addLast(Frame(qn, line, col, attrs))
@@ -173,8 +166,6 @@ class XmlReadCursor(
             when (wrapStax { reader.next() }) {
                 XMLStreamConstants.START_ELEMENT -> {
                     val qn = currentQName()
-                    val parent = stack.last()
-                    parent.nextChildIndex.also { parent.nextChildIndex++ }
                     val attrs = captureAttrs()
                     val (line, col) = wrapStax { reader.location.let { it.lineNumber to it.columnNumber } }
                     stack.addLast(Frame(qn, line, col, attrs))
@@ -221,8 +212,6 @@ class XmlReadCursor(
                 }
                 XMLStreamConstants.START_ELEMENT -> {
                     val qn = currentQName()
-                    val parent = stack.last()
-                    parent.nextChildIndex.also { parent.nextChildIndex++ }
                     val attrs = captureAttrs()
                     val (line, col) = wrapStax { reader.location.let { it.lineNumber to it.columnNumber } }
                     stack.addLast(Frame(qn, line, col, attrs))
@@ -272,8 +261,6 @@ class XmlReadCursor(
             when (wrapStax { reader.next() }) {
                 XMLStreamConstants.START_ELEMENT -> {
                     val qn = currentQName()
-                    val parent = stack.last()
-                    parent.nextChildIndex.also { parent.nextChildIndex++ }
                     val attrs = captureAttrs()
                     val (line, col) = wrapStax { reader.location.let { it.lineNumber to it.columnNumber } }
                     stack.addLast(Frame(qn, line, col, attrs))

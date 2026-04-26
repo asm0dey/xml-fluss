@@ -16,12 +16,26 @@ data class QName(val ns: String?, val local: String) {
  */
 sealed class Step {
     /**
-     * A named element step, optionally constrained by an attribute or position [predicate].
+     * A named element step, optionally constrained by an ordered list of bracket [brackets].
+     *
+     * Each bracket is a [Predicate]. Brackets apply in order and follow XPath semantics: a
+     * positional check inside bracket `k` counts only same-name siblings under the parent that
+     * passed every earlier bracket. So `step[@a='x'][2]` means "the 2nd same-name sibling among
+     * those with `@a='x'`", not "the 2nd same-name sibling that also has `@a='x'`".
      *
      * Local-name `*` matches any element name. Namespace [PathParser.WILDCARD] matches any
      * namespace.
      */
-    data class Named(val name: QName, val predicate: Predicate? = null) : Step()
+    data class Named(val name: QName, val brackets: List<Predicate> = emptyList()) : Step() {
+        /**
+         * Compatibility view that folds [brackets] with implicit `and`. Useful for callers that
+         * only need a boolean filter — for example `@XmlChild` codegen, where positional brackets
+         * are rejected at validation, so an `and`-fold keeps the same semantics. The matcher
+         * itself never reads this; it walks [brackets] in order to honour XPath positional rules.
+         */
+        val predicate: Predicate?
+            get() = brackets.reduceOrNull { a, b -> Predicate.And(a, b) }
+    }
 
     /** Descendant-or-self axis. Lets the next named step match at any depth. */
     data object Descendant : Step()

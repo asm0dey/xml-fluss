@@ -5,12 +5,10 @@ import xmlfluss.XmlChild
 import xmlfluss.XmlRecord
 
 /**
- * Chained-bracket predicates: `step[a][b]` is sugar for `step[a and b]`. Useful when
- * combining an attribute filter with a positional one (`[@kind='post'][2]`).
- *
- * Note: `[N]` counts ALL same-named siblings under the parent, not just those passing the
- * attribute predicate. So `[@kind='post'][2]` matches the element that is BOTH the 2nd
- * `<item>` sibling AND carries `kind="post"` — not "the 2nd post".
+ * Chained-bracket predicates follow XPath semantics: brackets evaluate in order, and a
+ * positional check inside a later bracket counts only same-name siblings under the parent
+ * that already passed every earlier bracket. So `[@kind='post'][2]` matches "the 2nd
+ * `<item>` carrying `kind='post'`" — not "the 2nd `<item>` overall, also a post".
  */
 @XmlRecord(path = "//item[@kind='post'][2]")
 data class SecondPostItem(

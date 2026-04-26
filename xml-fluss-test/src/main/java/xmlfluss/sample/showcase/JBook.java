@@ -38,5 +38,11 @@ public record JBook(
         @XmlMap(entry = "m:royalty", key = "price", value = "share/author")
         Map<JMoney, List<JAuthor>> royalties,
         @XmlMap(entry = "regional", key = "@region", value = "amount")
-        Map<String, BigDecimal> regionalPrice
+        Map<String, BigDecimal> regionalPrice,
+        @XmlChild(path = "link[@type='application/epub+zip']/@href") @Nullable String epubHref,
+        @XmlChild(path = "link[@type='application/epub+zip']/@rel") @Nullable String epubRel,
+        @XmlChild(path = "link[@type='application/atom+xml']/@href") @Nullable String atomHref,
+        // Chained-bracket predicate: implicit AND of two attribute checks.
+        @XmlChild(path = "link[@type='application/epub+zip'][@rel='http://opds-spec.org/acquisition']/@href")
+        @Nullable String acquisitionEpubHref
 ) {}

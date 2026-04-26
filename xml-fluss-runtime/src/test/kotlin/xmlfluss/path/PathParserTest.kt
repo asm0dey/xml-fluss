@@ -60,6 +60,28 @@ class PathParserTest {
         assertTrue(p is Predicate.Or)
     }
 
+    @Test fun predicate_chainedBracketsAreImplicitAnd() {
+        val cp = parse("//book[@a='1'][@b='2']")
+        val p = (cp.steps.last() as Step.Named).predicate
+        assertTrue(p is Predicate.And)
+        val and = p as Predicate.And
+        val l = and.l as Predicate.AttrEq
+        val r = and.r as Predicate.AttrEq
+        assertEquals("a", l.name.local)
+        assertEquals("1", l.value)
+        assertEquals("b", r.name.local)
+        assertEquals("2", r.value)
+    }
+
+    @Test fun predicate_chainedAttrAndPosition() {
+        val cp = parse("//entry[@kind='post'][3]")
+        val p = (cp.steps.last() as Step.Named).predicate as Predicate.And
+        assertTrue(p.l is Predicate.AttrEq)
+        val r = p.r
+        assertTrue(r is Predicate.Index)
+        assertEquals(3, r.n)
+    }
+
     @Test fun predicate_missingClose_throws() {
         assertFailsWith<PathParseException> { parse("//book[@a='1'") }
     }

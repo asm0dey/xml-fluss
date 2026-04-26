@@ -3,6 +3,11 @@ package xmlfluss.apt;
 import com.palantir.javapoet.ClassName;
 import com.palantir.javapoet.ParameterizedTypeName;
 import com.palantir.javapoet.TypeName;
+import xmlfluss.path.CompiledPath;
+import xmlfluss.path.PathParseException;
+import xmlfluss.path.PathParser;
+import xmlfluss.path.Predicate;
+import xmlfluss.path.Step;
 
 import javax.annotation.processing.ProcessingEnvironment;
 import javax.lang.model.element.*;
@@ -579,33 +584,55 @@ final class Classifier {
             error(where, "@XmlChild path empty for '" + fieldName + "'");
             throw new ClassifierException("empty path " + fieldName);
         }
+        // Self-step shorthand. Historically tolerated by the loose splitter; treat as a single
+        // literal segment so existing @XmlMap value="." paths keep compiling.
+        if (path.equals(".")) {
+            return new Model.Source.Child(
+                    List.of(new Model.PathSeg.Element(nsMap.get(""), ".", null)),
+                    false);
+        }
         boolean descendant = path.startsWith("//");
-        String rest = descendant ? path.substring(2) : path;
-        if (rest.isEmpty() || rest.startsWith("/")) {
-            error(where, "@XmlChild path '" + path + "' for '" + fieldName + "': invalid syntax");
+        if (path.startsWith("/") && !descendant) {
+            error(where, "@XmlChild path '" + path + "' for '" + fieldName + "': invalid syntax (absolute paths are not supported)");
             throw new ClassifierException("bad path syntax " + fieldName);
         }
-        String[] parts = rest.split("/");
-        List<String> partList = new ArrayList<>(parts.length);
-        for (String p : parts) if (!p.isEmpty()) partList.add(p);
-        if (partList.isEmpty()) {
-            error(where, "@XmlChild path invalid for '" + fieldName + "'");
+        String defaultNs = nsMap.get("");
+        Map<String, String> nsForParser = nsMap;
+        PathParser parser = new PathParser(prefix -> nsForParser.get(prefix), defaultNs);
+        CompiledPath compiled;
+        try {
+            compiled = parser.parse(path);
+        } catch (PathParseException e) {
+            error(where, "@XmlChild path '" + path + "' for '" + fieldName + "': "
+                    + rewriteParseError(e.getMessage() == null ? "" : e.getMessage()));
             throw new ClassifierException("bad path " + fieldName);
         }
-        if (descendant && partList.get(0).startsWith("@")) {
+        List<Step> rawSteps = compiled.getSteps();
+        // PathParser auto-prepends a descendant axis to every relative path; strip a leading
+        // descendant either way and rely on our own boolean.
+        List<Step> steps = !rawSteps.isEmpty() && rawSteps.get(0) instanceof Step.Descendant
+                ? rawSteps.subList(1, rawSteps.size())
+                : rawSteps;
+        if (steps.isEmpty()) {
+            error(where, "@XmlChild path '" + path + "' for '" + fieldName + "': empty after axis");
+            throw new ClassifierException("empty after axis " + fieldName);
+        }
+        if (descendant && steps.get(0) instanceof Step.AttrLeaf) {
             error(where, "@XmlChild path '" + path + "' for '" + fieldName
                     + "': descendant axis head must be an element");
             throw new ClassifierException("descendant attr head " + fieldName);
         }
-        String defaultNs = nsMap.get("");
-        List<Model.PathSeg> segs = new ArrayList<>(partList.size());
-        for (int i = 0; i < partList.size(); i++) {
-            String part = partList.get(i);
-            boolean last = i == partList.size() - 1;
-            if (part.startsWith("@")) {
+        List<Model.PathSeg> segs = new ArrayList<>(steps.size());
+        for (int i = 0; i < steps.size(); i++) {
+            Step s = steps.get(i);
+            boolean last = i == steps.size() - 1;
+            if (s instanceof Step.Descendant) {
+                error(where, "@XmlChild path '" + path + "' for '" + fieldName
+                        + "': '//' is only allowed at the head of the path");
+                throw new ClassifierException("inner descendant " + fieldName);
+            } else if (s instanceof Step.AttrLeaf attr) {
                 if (!last) {
-                    error(where, "@XmlChild path '" + path + "' for '" + fieldName
-                            + "': '@' segment must be last");
+                    error(where, "@XmlChild path '" + path + "' for '" + fieldName + "': '@' segment must be last");
                     throw new ClassifierException("@-not-last " + fieldName);
                 }
                 if (i == 0) {
@@ -613,15 +640,55 @@ final class Classifier {
                             + "': use @XmlAttr for record-level attributes");
                     throw new ClassifierException("@ at root " + fieldName);
                 }
-                QNameInfo qn = resolveQName(part.substring(1), nsMap, /*defaultNs=*/null,
-                        where, "@XmlChild", fieldName);
-                segs.add(new Model.PathSeg.AttrLeaf(qn.ns, qn.local));
+                segs.add(new Model.PathSeg.AttrLeaf(attr.getName().getNs(), attr.getName().getLocal()));
             } else {
-                QNameInfo qn = resolveQName(part, nsMap, defaultNs, where, "@XmlChild", fieldName);
-                segs.add(new Model.PathSeg.Element(qn.ns, qn.local));
+                Step.Named named = (Step.Named) s;
+                if ("*".equals(named.getName().getLocal())) {
+                    error(where, "@XmlChild path '" + path + "' for '" + fieldName
+                            + "': wildcard local-name '*' is not supported");
+                    throw new ClassifierException("wildcard local " + fieldName);
+                }
+                if (PathParser.WILDCARD.equals(named.getName().getNs())) {
+                    error(where, "@XmlChild path '" + path + "' for '" + fieldName
+                            + "': wildcard namespace '{*}' is not supported");
+                    throw new ClassifierException("wildcard ns " + fieldName);
+                }
+                Predicate pred = named.getPredicate();
+                if (pred != null) validateChildPredicate(pred, path, fieldName, where);
+                segs.add(new Model.PathSeg.Element(named.getName().getNs(), named.getName().getLocal(), pred));
             }
         }
         return new Model.Source.Child(segs, descendant);
+    }
+
+    private static String rewriteParseError(String msg) {
+        String out = msg.replace("unbound namespace prefix", "unbound NS prefix");
+        if (out.startsWith("expected local-name after ':'") || out.startsWith("expected local-name after '}'")) {
+            out = "malformed (bad qname): " + out;
+        }
+        return out;
+    }
+
+    private void validateChildPredicate(Predicate p, String path, String fieldName, Element where) {
+        if (p instanceof Predicate.Index idx) {
+            error(where, "@XmlChild path '" + path + "' for '" + fieldName
+                    + "': positional predicate [" + idx.getN() + "] is not supported inside @XmlChild. "
+                    + "Move the positional filter to @XmlRecord (e.g. @XmlRecord(\"//... [" + idx.getN() + "]\")) "
+                    + "or collect siblings into a List<T> field and pick by index in your code.");
+            throw new ClassifierException("index predicate " + fieldName);
+        } else if (p instanceof Predicate.AttrEq ae) {
+            if (PathParser.WILDCARD.equals(ae.getName().getNs())) {
+                error(where, "@XmlChild path '" + path + "' for '" + fieldName
+                        + "': wildcard namespace in attribute predicate is not supported");
+                throw new ClassifierException("wildcard pred ns " + fieldName);
+            }
+        } else if (p instanceof Predicate.And and) {
+            validateChildPredicate(and.getL(), path, fieldName, where);
+            validateChildPredicate(and.getR(), path, fieldName, where);
+        } else if (p instanceof Predicate.Or or) {
+            validateChildPredicate(or.getL(), path, fieldName, where);
+            validateChildPredicate(or.getR(), path, fieldName, where);
+        }
     }
 
     private void validateChildPaths(TypeElement owner, String ownerFq, List<Model.FieldSpec> fields) {
@@ -727,7 +794,7 @@ final class Classifier {
 
     /** Trie node for direct-child path validation. Mirrors KSP. */
     static final class TrieNode {
-        final Map<Model.QKey, TrieNode> children = new LinkedHashMap<>();
+        final Map<Model.EdgeKey, TrieNode> children = new LinkedHashMap<>();
         final List<AttrEntry> attrEntries = new ArrayList<>();
         final List<Model.FieldSpec> textEntries = new ArrayList<>();
         final List<Model.FieldSpec> nestedEntries = new ArrayList<>();
@@ -741,7 +808,8 @@ final class Classifier {
         int i = 0;
         for (; i < segments.size(); i++) {
             if (!(segments.get(i) instanceof Model.PathSeg.Element e)) break;
-            node = node.children.computeIfAbsent(new Model.QKey(e.ns(), e.name()), k -> new TrieNode());
+            Model.EdgeKey edge = new Model.EdgeKey(new Model.QKey(e.ns(), e.name()), e.predicate());
+            node = node.children.computeIfAbsent(edge, k -> new TrieNode());
         }
         if (i == segments.size()) {
             if (f.coerce() instanceof Model.Coerce.Nested) node.nestedEntries.add(f);

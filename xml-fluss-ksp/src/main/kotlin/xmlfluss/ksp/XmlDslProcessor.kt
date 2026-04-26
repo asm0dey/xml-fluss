@@ -9,6 +9,10 @@ import com.squareup.kotlinpoet.ksp.toClassName
 import com.squareup.kotlinpoet.ksp.writeTo
 import java.time.LocalDate
 import javax.annotation.processing.Generated
+import xmlfluss.path.PathParser
+import xmlfluss.path.Predicate as PathPredicate
+import xmlfluss.path.QName as PathQName
+import xmlfluss.path.Step as PathStep
 
 private const val XMLFLUSS_RUNTIME = "xmlfluss.runtime"
 private const val SKIP_CHILD = "c.skipChild()\n"
@@ -448,33 +452,95 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
 
     private fun parseChildPath(path: String, fieldName: String, nsMap: Map<String, String>): Source.Child {
         vRequire(path.isNotBlank()) { "@XmlChild path empty for '$fieldName'" }
-        val descendant = path.startsWith("//")
-        val rest = if (descendant) path.substring(2) else path
-        vRequire(rest.isNotEmpty() && !rest.startsWith("/")) {
-            "@XmlChild path '$path' for '$fieldName': invalid syntax"
+        // Self-step shorthand. Historically accepted by the loose splitter; treat as a
+        // single literal segment so existing @XmlMap value="." paths keep compiling.
+        if (path == ".") {
+            return Source.Child(listOf(PathSeg.Element(nsMap[""], ".")), descendant = false)
         }
-        val parts = rest.split('/').filter { it.isNotEmpty() }
-        vRequire(parts.isNotEmpty()) { "@XmlChild path invalid for '$fieldName'" }
-        if (descendant) {
-            vRequire(!parts[0].startsWith("@")) {
-                "@XmlChild path '$path' for '$fieldName': descendant axis head must be an element"
-            }
+        // Manually classify the leading axis — PathParser auto-prepends a descendant step to every
+        // relative path, which would erase the direct/descendant distinction we need here.
+        val descendant = path.startsWith("//")
+        // Reject absolute non-descendant paths up front (`/foo`); PathParser would parse them but
+        // they have no anchor inside @XmlChild.
+        vRequire(!(path.startsWith("/") && !descendant)) {
+            "@XmlChild path '$path' for '$fieldName': invalid syntax (absolute paths are not supported)"
         }
         val defaultNs: String? = nsMap[""]
-        val out = mutableListOf<PathSeg>()
-        for ((i, part) in parts.withIndex()) {
-            val isLast = i == parts.lastIndex
-            if (part.startsWith("@")) {
-                vRequire(isLast) { "@XmlChild path '$path' for '$fieldName': '@' segment must be last" }
+        val parser = PathParser(
+            nsResolve = { prefix -> nsMap[prefix] },
+            defaultNs = defaultNs,
+        )
+        val compiled = try {
+            parser.parse(path)
+        } catch (e: xmlfluss.path.PathParseException) {
+            vError("@XmlChild path '$path' for '$fieldName': ${rewriteParseError(e.message ?: "")}")
+        }
+        // PathParser auto-prepends a descendant step for relative paths and emits one for `//`;
+        // strip the leading descendant either way and rely on our own `descendant` flag.
+        val rawSteps = compiled.steps
+        val steps = if (rawSteps.firstOrNull() is PathStep.Descendant) rawSteps.drop(1) else rawSteps
+        vRequire(steps.isNotEmpty()) { "@XmlChild path '$path' for '$fieldName': empty after axis" }
+        if (descendant && steps.firstOrNull() is PathStep.AttrLeaf) {
+            vError("@XmlChild path '$path' for '$fieldName': descendant axis head must be an element")
+        }
+        // Reject internal descendant axes (e.g. wrapper//leaf) — current trie only supports
+        // a single optional descendant prefix at the head.
+        for ((i, s) in steps.withIndex()) {
+            if (s is PathStep.Descendant) {
+                vError("@XmlChild path '$path' for '$fieldName': '//' is only allowed at the head of the path")
+            }
+            if (s is PathStep.AttrLeaf) {
+                vRequire(i == steps.lastIndex) { "@XmlChild path '$path' for '$fieldName': '@' segment must be last" }
                 vRequire(i > 0) { "@XmlChild path '$path' for '$fieldName': use @XmlAttr for record-level attributes" }
-                val (ns, local) = resolveQName(part.substring(1), nsMap, defaultNs = null, path, fieldName)
-                out += PathSeg.AttrLeaf(ns, local)
-            } else {
-                val (ns, local) = resolveQName(part, nsMap, defaultNs = defaultNs, path, fieldName)
-                out += PathSeg.Element(ns, local)
+            }
+        }
+        val out = mutableListOf<PathSeg>()
+        for ((idx, s) in steps.withIndex()) {
+            when (s) {
+                is PathStep.Named -> {
+                    vRequire(s.name.local != "*") {
+                        "@XmlChild path '$path' for '$fieldName': wildcard local-name '*' is not supported"
+                    }
+                    vRequire(s.name.ns != PathParser.WILDCARD) {
+                        "@XmlChild path '$path' for '$fieldName': wildcard namespace '{*}' is not supported"
+                    }
+                    val pred = s.predicate
+                    if (pred != null) validateChildPredicate(pred, path, fieldName)
+                    out += PathSeg.Element(s.name.ns, s.name.local, pred)
+                }
+                is PathStep.AttrLeaf -> {
+                    out += PathSeg.AttrLeaf(s.name.ns, s.name.local)
+                }
+                PathStep.Descendant -> error("unreachable: descendant filtered above")
             }
         }
         return Source.Child(out, descendant)
+    }
+
+    private fun rewriteParseError(msg: String): String {
+        // Normalize PathParser wording into the historical messages we expose to users.
+        var out = msg
+        out = out.replace("unbound namespace prefix", "unbound NS prefix")
+        if (out.startsWith("expected local-name after ':'") || out.startsWith("expected local-name after '}'")) {
+            out = "malformed (bad qname): $out"
+        }
+        return out
+    }
+
+    private fun validateChildPredicate(p: PathPredicate, path: String, fieldName: String) {
+        when (p) {
+            is PathPredicate.Index -> vError(
+                "@XmlChild path '$path' for '$fieldName': positional predicate [${p.n}] is not supported inside @XmlChild. " +
+                "Move the positional filter to @XmlRecord (e.g. @XmlRecord(\"//... [${p.n}]\")) or collect siblings into a List<T> field and pick by index in your code."
+            )
+            is PathPredicate.AttrEq -> {
+                vRequire(p.name.ns != PathParser.WILDCARD) {
+                    "@XmlChild path '$path' for '$fieldName': wildcard namespace in attribute predicate is not supported"
+                }
+            }
+            is PathPredicate.And -> { validateChildPredicate(p.l, path, fieldName); validateChildPredicate(p.r, path, fieldName) }
+            is PathPredicate.Or -> { validateChildPredicate(p.l, path, fieldName); validateChildPredicate(p.r, path, fieldName) }
+        }
     }
 
     private fun buildPolyChild(
@@ -652,10 +718,11 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
     private fun insertIntoTrie(root: TrieNode, segments: List<PathSeg>, f: FieldSpec) {
         var node = root
         val elements = segments.takeWhile { it is PathSeg.Element }
-            .map { (it as PathSeg.Element).let { e -> QKey(e.ns, e.name) } }
+            .map { it as PathSeg.Element }
         val tail = segments.drop(elements.size)
         for (e in elements) {
-            node = node.children.getOrPut(e) { TrieNode() }
+            val edge = EdgeKey(QKey(e.ns, e.name), e.predicate)
+            node = node.children.getOrPut(edge) { TrieNode() }
         }
         when {
             tail.isEmpty() -> {
@@ -1001,20 +1068,149 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         if (f.nullable) cb.add("__set_${f.name} = true\n")
     }
 
-    private fun emitChildrenSwitch(cb: CodeBlock.Builder, node: TrieNode, registry: NestedTypeRegistry) {
+    private fun emitChildrenSwitch(
+        cb: CodeBlock.Builder,
+        node: TrieNode,
+        registry: NestedTypeRegistry,
+    ) {
         if (node.children.isEmpty()) {
             cb.add(SKIP_CHILD)
             return
         }
+        val grouped = groupChildrenByQKey(node)
         cb.beginControlFlow("when(ln)")
-        for ((key, child) in node.children) {
-            val cond = qnameCond(key.ns, key.local)
+        for ((qk, branches) in grouped) {
+            val cond = qnameCond(qk.ns, qk.local)
             cb.beginControlFlow("%L ->", cond)
-            emitChildBody(cb, child, registry)
+            emitPredicateBranches(cb, branches, registry)
             cb.endControlFlow()
         }
         cb.add(ELSE_SKIP_CHILD)
         cb.endControlFlow()
+    }
+
+    private fun groupChildrenByQKey(node: TrieNode): LinkedHashMap<QKey, MutableList<Pair<PathPredicate?, TrieNode>>> {
+        val grouped = LinkedHashMap<QKey, MutableList<Pair<PathPredicate?, TrieNode>>>()
+        for ((edge, child) in node.children) {
+            grouped.getOrPut(edge.qkey) { mutableListOf() }.add(edge.predicate to child)
+        }
+        return grouped
+    }
+
+    private fun emitPredicateBranches(
+        cb: CodeBlock.Builder,
+        branches: List<Pair<PathPredicate?, TrieNode>>,
+        registry: NestedTypeRegistry,
+    ) {
+        if (branches.size == 1 && branches[0].first == null) {
+            emitChildBody(cb, branches[0].second, registry)
+            return
+        }
+        // Two-pass dispatch when predicate variants overlap on the same element:
+        //  1. attr-only reads run for EVERY matching predicate (childAttr is a pure lookup, no
+        //     element consumption). Without this, two paths like
+        //       link[@type='epub']/@href
+        //       link[@type='epub'][@rel='acq']/@href
+        //     would race and only the first matching arm would fire.
+        //  2. Body-consuming variants (text / nested / descend) dispatch first-match-wins —
+        //     a single element body can only be consumed once.
+        for ((pred, child) in branches) {
+            if (child.attrEntries.isEmpty()) continue
+            val expr = if (pred == null) CodeBlock.of("true") else predicateExpr(pred)
+            cb.beginControlFlow("if (%L)", expr)
+            emitAttrEntries(cb, child)
+            cb.endControlFlow()
+        }
+        val bodyBranches = branches.filter { (_, n) -> nodeHasBodyContent(n) }
+        if (bodyBranches.isEmpty()) {
+            cb.add(SKIP_CHILD)
+            return
+        }
+        cb.beginControlFlow("when")
+        for ((pred, child) in bodyBranches) {
+            val expr = if (pred == null) CodeBlock.of("true") else predicateExpr(pred)
+            cb.beginControlFlow("%L ->", expr)
+            emitChildBodyContent(cb, child, registry)
+            cb.endControlFlow()
+        }
+        cb.add("else -> $SKIP_CHILD")
+        cb.endControlFlow()
+    }
+
+    private fun nodeHasBodyContent(node: TrieNode): Boolean =
+        node.textEntries.isNotEmpty() || node.nestedEntries.isNotEmpty() || node.children.isNotEmpty()
+
+    private fun emitAttrEntries(cb: CodeBlock.Builder, node: TrieNode) {
+        for ((attrNs, attrName, f) in node.attrEntries) {
+            val nsLit: CodeBlock = if (attrNs == null) CodeBlock.of("null") else CodeBlock.of("%S", attrNs)
+            if (f.isList) {
+                cb.add("c.childAttr(%L, %S)?.let { __list_${f.name}.add(it) }\n", nsLit, attrName)
+            } else if (needsChildLoc(f)) {
+                cb.add(
+                    "c.childAttr(%L, %S)?.let { __raw_${f.name} = it; __loc_${f.name} = c.childLocation(); __set_${f.name} = true }\n",
+                    nsLit, attrName
+                )
+            } else {
+                cb.add(
+                    "c.childAttr(%L, %S)?.let { __raw_${f.name} = it; __set_${f.name} = true }\n",
+                    nsLit, attrName
+                )
+            }
+        }
+    }
+
+    private fun emitChildBodyContent(cb: CodeBlock.Builder, node: TrieNode, registry: NestedTypeRegistry) {
+        val hasText = node.textEntries.isNotEmpty()
+        val hasNested = node.nestedEntries.isNotEmpty()
+        val hasDescend = node.children.isNotEmpty()
+        when {
+            hasNested -> {
+                for (f in node.nestedEntries) {
+                    val spec = registry.byFq.getValue(f.elemTypeFq)
+                    cb.add("val __n_${f.name}·=·${spec.helperName}(c)\n")
+                    if (f.isList) {
+                        cb.add("__list_${f.name}.add(__n_${f.name})\n")
+                    } else {
+                        cb.add("__nested_${f.name} = __n_${f.name}\n")
+                        cb.add("__set_${f.name} = true\n")
+                    }
+                }
+            }
+            hasText -> {
+                val needLoc = node.textEntries.any { needsChildLoc(it) }
+                if (needLoc) cb.add("val __t_loc·=·c.childLocation()\n")
+                cb.add("val __t = c.childText(false)\n")
+                for (f in node.textEntries) {
+                    if (f.isList) cb.add("__list_${f.name}.add(__t)\n")
+                    else {
+                        cb.add("__raw_${f.name} = __t\n")
+                        if (needsChildLoc(f)) cb.add("__loc_${f.name} = __t_loc\n")
+                        cb.add("__set_${f.name} = true\n")
+                    }
+                }
+            }
+            hasDescend -> {
+                cb.beginControlFlow("c.forEachChild·{ ln, ns ->\n")
+                emitChildrenSwitch(cb, node, registry)
+                cb.endControlFlow()
+            }
+            else -> cb.add(SKIP_CHILD)
+        }
+    }
+
+    private fun predicateExpr(p: PathPredicate): CodeBlock = when (p) {
+        is PathPredicate.AttrEq -> {
+            val ns = p.name.ns
+            val nsLit: CodeBlock = if (ns == null) CodeBlock.of("null") else CodeBlock.of("%S", ns)
+            if (p.negate) {
+                CodeBlock.of("(c.childAttr(%L, %S).let { it == null || it != %S })", nsLit, p.name.local, p.value)
+            } else {
+                CodeBlock.of("(c.childAttr(%L, %S) == %S)", nsLit, p.name.local, p.value)
+            }
+        }
+        is PathPredicate.And -> CodeBlock.of("(%L && %L)", predicateExpr(p.l), predicateExpr(p.r))
+        is PathPredicate.Or -> CodeBlock.of("(%L || %L)", predicateExpr(p.l), predicateExpr(p.r))
+        is PathPredicate.Index -> error("Index predicate not supported in @XmlChild; rejected at validation")
     }
 
     private fun emitTopLevelChildSwitch(
@@ -1030,16 +1226,17 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             cb.add(SKIP_CHILD)
             return
         }
-        val byHead = LinkedHashMap<QKey, MutableList<FieldSpec>>()
+        val byHead = LinkedHashMap<QKey, MutableList<Pair<PathPredicate?, FieldSpec>>>()
         for (f in descendantFields) {
             val seg = (f.source as Source.Child).segments[0] as PathSeg.Element
-            byHead.getOrPut(QKey(seg.ns, seg.name)) { mutableListOf() }.add(f)
+            byHead.getOrPut(QKey(seg.ns, seg.name)) { mutableListOf() }.add(seg.predicate to f)
         }
+        val groupedDirect = groupChildrenByQKey(directRoot)
         cb.beginControlFlow("when(ln)")
-        for ((key, child) in directRoot.children) {
-            val cond = qnameCond(key.ns, key.local)
+        for ((qk, branches) in groupedDirect) {
+            val cond = qnameCond(qk.ns, qk.local)
             cb.beginControlFlow("%L ->", cond)
-            emitChildBody(cb, child, registry)
+            emitPredicateBranches(cb, branches, registry)
             cb.endControlFlow()
         }
         for (mf in mapFields) {
@@ -1067,10 +1264,10 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
                 }
             }
         }
-        for ((head, fields) in byHead) {
+        for ((head, branches) in byHead) {
             val cond = qnameCond(head.ns, head.local)
             cb.beginControlFlow("%L ->", cond)
-            emitDescendantArm(cb, head, fields, registry, terminating = false)
+            emitDescendantArm(cb, head, branches, registry, terminating = false)
             cb.endControlFlow()
         }
         if (byHead.isEmpty()) {
@@ -1079,10 +1276,10 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             cb.beginControlFlow("else ->")
             cb.beginControlFlow("c.forEachDescendantInChild·{ dln, dns ->\n")
             cb.beginControlFlow("when(dln)")
-            for ((head, fields) in byHead) {
+            for ((head, branches) in byHead) {
                 val cond = qnameCond(head.ns, head.local, nsVar = "dns")
                 cb.beginControlFlow("%L ->", cond)
-                emitDescendantArm(cb, head, fields, registry, terminating = true)
+                emitDescendantArm(cb, head, branches, registry, terminating = true)
                 cb.endControlFlow()
             }
             cb.add("else -> false\n")
@@ -1096,9 +1293,41 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
     private fun emitDescendantArm(
         cb: CodeBlock.Builder,
         head: QKey,
-        headFields: List<FieldSpec>,
+        branches: List<Pair<PathPredicate?, FieldSpec>>,
         registry: NestedTypeRegistry,
         terminating: Boolean,
+    ) {
+        val unguarded = branches.filter { it.first == null }.map { it.second }
+        val guarded = branches.filter { it.first != null }
+        if (guarded.isEmpty()) {
+            emitDescendantArmBody(cb, head, unguarded, registry)
+            if (terminating) cb.add("true\n")
+            return
+        }
+        cb.beginControlFlow("when")
+        for ((pred, f) in guarded) {
+            cb.beginControlFlow("%L ->", predicateExpr(pred!!))
+            emitDescendantArmBody(cb, head, listOf(f), registry)
+            if (terminating) cb.add("true\n")
+            cb.endControlFlow()
+        }
+        if (unguarded.isNotEmpty()) {
+            cb.beginControlFlow("else ->")
+            emitDescendantArmBody(cb, head, unguarded, registry)
+            if (terminating) cb.add("true\n")
+            cb.endControlFlow()
+        } else {
+            cb.add("else -> ")
+            if (terminating) cb.add("false\n") else cb.add(SKIP_CHILD)
+        }
+        cb.endControlFlow()
+    }
+
+    private fun emitDescendantArmBody(
+        cb: CodeBlock.Builder,
+        head: QKey,
+        headFields: List<FieldSpec>,
+        registry: NestedTypeRegistry,
     ) {
         val emptyTail = headFields.filter { (it.source as Source.Child).segments.size == 1 }
         val nonEmptyTail = headFields.filter { (it.source as Source.Child).segments.size > 1 }
@@ -1118,7 +1347,6 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             }
             emitChildBody(cb, tailTrie, registry)
         }
-        if (terminating) cb.add("true\n")
     }
 
     private fun qnameCond(ns: String?, local: String, nsVar: String = "ns"): CodeBlock =
@@ -1190,61 +1418,8 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
     }
 
     private fun emitChildBody(cb: CodeBlock.Builder, node: TrieNode, registry: NestedTypeRegistry) {
-        for ((attrNs, attrName, f) in node.attrEntries) {
-            val nsLit: CodeBlock = if (attrNs == null) CodeBlock.of("null") else CodeBlock.of("%S", attrNs)
-            if (f.isList) {
-                cb.add("c.childAttr(%L, %S)?.let { __list_${f.name}.add(it) }\n", nsLit, attrName)
-            } else if (needsChildLoc(f)) {
-                cb.add(
-                    "c.childAttr(%L, %S)?.let { __raw_${f.name} = it; __loc_${f.name} = c.childLocation(); __set_${f.name} = true }\n",
-                    nsLit, attrName
-                )
-            } else {
-                cb.add(
-                    "c.childAttr(%L, %S)?.let { __raw_${f.name} = it; __set_${f.name} = true }\n",
-                    nsLit, attrName
-                )
-            }
-        }
-        val hasText = node.textEntries.isNotEmpty()
-        val hasNested = node.nestedEntries.isNotEmpty()
-        val hasDescend = node.children.isNotEmpty()
-        when {
-            hasNested -> {
-                for (f in node.nestedEntries) {
-                    val spec = registry.byFq.getValue(f.elemTypeFq)
-                    cb.add("val __n_${f.name}·=·${spec.helperName}(c)\n")
-                    if (f.isList) {
-                        cb.add("__list_${f.name}.add(__n_${f.name})\n")
-                    } else {
-                        cb.add("__nested_${f.name} = __n_${f.name}\n")
-                        cb.add("__set_${f.name} = true\n")
-                    }
-                }
-            }
-
-            hasText -> {
-                val needLoc = node.textEntries.any { needsChildLoc(it) }
-                if (needLoc) cb.add("val __t_loc·=·c.childLocation()\n")
-                cb.add("val __t = c.childText(false)\n")
-                for (f in node.textEntries) {
-                    if (f.isList) cb.add("__list_${f.name}.add(__t)\n")
-                    else {
-                        cb.add("__raw_${f.name} = __t\n")
-                        if (needsChildLoc(f)) cb.add("__loc_${f.name} = __t_loc\n")
-                        cb.add("__set_${f.name} = true\n")
-                    }
-                }
-            }
-
-            hasDescend -> {
-                cb.beginControlFlow("c.forEachChild·{ ln, ns ->\n")
-                emitChildrenSwitch(cb, node, registry)
-                cb.endControlFlow()
-            }
-
-            else -> cb.add(SKIP_CHILD)
-        }
+        emitAttrEntries(cb, node)
+        emitChildBodyContent(cb, node, registry)
     }
 
     private fun coerceField(f: FieldSpec, convVarFor: Map<String, String>): CodeBlock {
@@ -1378,7 +1553,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
     enum class Ctx { RECORD, SUBRECORD }
 
     sealed class PathSeg {
-        data class Element(val ns: String?, val name: String) : PathSeg()
+        data class Element(val ns: String?, val name: String, val predicate: PathPredicate? = null) : PathSeg()
         data class AttrLeaf(val ns: String?, val name: String) : PathSeg()
     }
 
@@ -1430,8 +1605,10 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
 
     data class QKey(val ns: String?, val local: String)
 
+    data class EdgeKey(val qkey: QKey, val predicate: PathPredicate?)
+
     class TrieNode {
-        val children: MutableMap<QKey, TrieNode> = LinkedHashMap()
+        val children: MutableMap<EdgeKey, TrieNode> = LinkedHashMap()
         val attrEntries: MutableList<Triple<String?, String, FieldSpec>> = mutableListOf()
         val textEntries: MutableList<FieldSpec> = mutableListOf()
         val nestedEntries: MutableList<FieldSpec> = mutableListOf()

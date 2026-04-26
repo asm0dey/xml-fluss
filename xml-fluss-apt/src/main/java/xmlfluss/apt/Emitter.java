@@ -355,21 +355,23 @@ final class Emitter {
             cb.addStatement("c.skipChild()");
             return;
         }
-        // Group descendant fields by head qname.
-        Map<Model.QKey, List<Model.FieldSpec>> byHead = new LinkedHashMap<>();
+        // Group descendant fields by head qname (predicate kept alongside).
+        Map<Model.QKey, List<Map.Entry<xmlfluss.path.Predicate, Model.FieldSpec>>> byHead = new LinkedHashMap<>();
         for (Model.FieldSpec f : descendantFields) {
             Model.PathSeg.Element head = (Model.PathSeg.Element) ((Model.Source.Child) f.source()).segments().get(0);
-            byHead.computeIfAbsent(new Model.QKey(head.ns(), head.name()), k -> new ArrayList<>()).add(f);
+            byHead.computeIfAbsent(new Model.QKey(head.ns(), head.name()), k -> new ArrayList<>())
+                    .add(new java.util.AbstractMap.SimpleEntry<>(head.predicate(), f));
         }
 
         boolean first = true;
-        // Direct children.
-        for (var entry : directRoot.children.entrySet()) {
+        // Direct children, grouped by base QKey (predicate variants dispatched inside).
+        var groupedDirect = groupChildrenByQKey(directRoot);
+        for (var entry : groupedDirect.entrySet()) {
             Model.QKey key = entry.getKey();
             String prefix = first ? "if " : "else if ";
             first = false;
             cb.add("$L($S.equals($L) && $L) {\n", prefix, key.local(), lnVar, nsMatchExprVar(key.ns(), nsVar)).indent();
-            emitChildBody(cb, entry.getValue(), registry, converterRefs);
+            emitPredicateBranches(cb, entry.getValue(), registry, converterRefs);
             cb.unindent().add("}\n");
         }
         // Map entry arms.
@@ -406,7 +408,7 @@ final class Emitter {
             String prefix = first ? "if " : "else if ";
             first = false;
             cb.add("$L($S.equals($L) && $L) {\n", prefix, head.local(), lnVar, nsMatchExprVar(head.ns(), nsVar)).indent();
-            emitDescendantArm(cb, entry.getValue(), registry, converterRefs /*terminating=*/);
+            emitDescendantArm(cb, entry.getValue(), registry, converterRefs, /*terminating=*/false);
             cb.unindent().add("}\n");
         }
         // Else: descendant scan or skipChild.
@@ -428,8 +430,7 @@ final class Emitter {
                 dfirst = false;
                 cb.add("$L($S.equals(dln) && $L) {\n", prefix, head.local(),
                         nsMatchExprVar(head.ns(), "dns")).indent();
-                emitDescendantArm(cb, entry.getValue(), registry, converterRefs /*terminating=*/);
-                cb.add("return true;\n");
+                emitDescendantArm(cb, entry.getValue(), registry, converterRefs, /*terminating=*/true);
                 cb.unindent().add("}\n");
             }
             cb.add("return false;\n");
@@ -440,8 +441,43 @@ final class Emitter {
 
     /** One arm of the descendant dispatch — head matched, walk tail or read leaf. */
     private void emitDescendantArm(CodeBlock.Builder cb,
-                                   List<Model.FieldSpec> headFields, Model.NestedRegistry registry,
-                                   Map<String, ConverterRef> converterRefs) {
+                                   List<Map.Entry<xmlfluss.path.Predicate, Model.FieldSpec>> branches,
+                                   Model.NestedRegistry registry,
+                                   Map<String, ConverterRef> converterRefs,
+                                   boolean terminating) {
+        List<Model.FieldSpec> unguarded = new ArrayList<>();
+        List<Map.Entry<xmlfluss.path.Predicate, Model.FieldSpec>> guarded = new ArrayList<>();
+        for (var entry : branches) {
+            if (entry.getKey() == null) unguarded.add(entry.getValue());
+            else guarded.add(entry);
+        }
+        if (guarded.isEmpty()) {
+            emitDescendantArmBody(cb, unguarded, registry, converterRefs);
+            if (terminating) cb.add("return true;\n");
+            return;
+        }
+        boolean first = true;
+        for (var entry : guarded) {
+            String prefix = first ? "if " : "else if ";
+            first = false;
+            cb.add("$L($L) {\n", prefix, predicateExpr(entry.getKey())).indent();
+            emitDescendantArmBody(cb, List.of(entry.getValue()), registry, converterRefs);
+            if (terminating) cb.add("return true;\n");
+            cb.unindent().add("}\n");
+        }
+        if (!unguarded.isEmpty()) {
+            cb.add("else {\n").indent();
+            emitDescendantArmBody(cb, unguarded, registry, converterRefs);
+            if (terminating) cb.add("return true;\n");
+            cb.unindent().add("}\n");
+        } else if (terminating) {
+            // No matching predicate variant: fall through, do not consume.
+        }
+    }
+
+    private void emitDescendantArmBody(CodeBlock.Builder cb,
+                                       List<Model.FieldSpec> headFields, Model.NestedRegistry registry,
+                                       Map<String, ConverterRef> converterRefs) {
         boolean anyEmpty = headFields.stream()
                 .anyMatch(f -> ((Model.Source.Child) f.source()).segments().size() == 1);
         boolean anyNonEmpty = headFields.stream()
@@ -487,33 +523,41 @@ final class Emitter {
     }
 
     /** Walk a trie at a non-root node — at the cursor's current child element. */
-    @SuppressWarnings("StatementWithEmptyBody")
     private void emitChildBody(CodeBlock.Builder cb, TrieNode node,
                                Model.NestedRegistry registry,
                                Map<String, ConverterRef> converterRefs) {
-        // Attribute leaves attached to this node first.
+        emitAttrEntries(cb, node);
+        emitChildBodyContent(cb, node, registry, converterRefs);
+    }
+
+    /** Pure attr reads — safe to run multiple times for overlapping predicate variants. */
+    private void emitAttrEntries(CodeBlock.Builder cb, TrieNode node) {
         for (var ae : node.attrEntries) {
             Model.FieldSpec f = ae.field();
+            cb.beginControlFlow("");
+            cb.addStatement("$T __a = c.childAttr($L, $S)",
+                    ClassName.get(String.class), nsLiteral(ae.ns()), ae.name());
+            cb.beginControlFlow("if (__a != null)");
             if (f.isList()) {
-                cb.beginControlFlow("");
-                cb.addStatement("$T __a = c.childAttr($L, $S)",
-                        ClassName.get(String.class), nsLiteral(ae.ns()), ae.name());
-                cb.beginControlFlow("if (__a != null)");
                 cb.addStatement("__list_$L.add(__a)", f.name());
-                cb.endControlFlow();
-                cb.endControlFlow();
             } else {
-                cb.beginControlFlow("");
-                cb.addStatement("$T __a = c.childAttr($L, $S)",
-                        ClassName.get(String.class), nsLiteral(ae.ns()), ae.name());
-                cb.beginControlFlow("if (__a != null)");
                 cb.addStatement("__raw_$L[0] = __a", f.name());
                 cb.addStatement("__loc_$L[0] = c.childLocation()", f.name());
                 cb.addStatement("__set_$L[0] = true", f.name());
-                cb.endControlFlow();
-                cb.endControlFlow();
             }
+            cb.endControlFlow();
+            cb.endControlFlow();
         }
+    }
+
+    /** Per-emitter counter for nested lambda variable names — Java forbids shadowing. */
+    private int lambdaDepth = 0;
+
+    /** Body-consuming dispatch — text / nested / descend. Caller decides whether to gate it. */
+    @SuppressWarnings("StatementWithEmptyBody")
+    private void emitChildBodyContent(CodeBlock.Builder cb, TrieNode node,
+                                      Model.NestedRegistry registry,
+                                      Map<String, ConverterRef> converterRefs) {
         boolean hasText = !node.textEntries.isEmpty();
         boolean hasNested = !node.nestedEntries.isEmpty();
         boolean hasDescend = !node.children.isEmpty();
@@ -540,9 +584,15 @@ final class Emitter {
                 }
             }
         } else if (hasDescend) {
-            cb.add("$T.forEachChild(c, (cln, cns) -> {\n", CN_ADAPTER).indent();
-            emitChildrenSwitch(cb, node, registry, converterRefs);
+            // Lambda var names suffixed by depth — Java forbids shadowing nested lambda
+            // params, so each `forEachChild` callback needs unique cln/cns identifiers.
+            int depth = ++lambdaDepth;
+            String lnVar = depth == 1 ? "cln" : "cln" + depth;
+            String nsVar = depth == 1 ? "cns" : "cns" + depth;
+            cb.add("$T.forEachChild(c, ($L, $L) -> {\n", CN_ADAPTER, lnVar, nsVar).indent();
+            emitChildrenSwitch(cb, node, registry, converterRefs, lnVar, nsVar);
             cb.unindent().add("});\n");
+            lambdaDepth--;
         } else {
             // node has only attrs, no element drains needed; cursor already positioned at the element.
             // Element body untouched: forEach* call site will skip leftovers.
@@ -551,18 +601,20 @@ final class Emitter {
 
     private void emitChildrenSwitch(CodeBlock.Builder cb, TrieNode node,
                                     Model.NestedRegistry registry,
-                                    Map<String, ConverterRef> converterRefs) {
+                                    Map<String, ConverterRef> converterRefs,
+                                    String lnVar, String nsVar) {
         if (node.children.isEmpty()) {
             cb.addStatement("c.skipChild()");
             return;
         }
+        var grouped = groupChildrenByQKey(node);
         boolean first = true;
-        for (var entry : node.children.entrySet()) {
+        for (var entry : grouped.entrySet()) {
             Model.QKey k = entry.getKey();
             String prefix = first ? "if " : "else if ";
             first = false;
-            cb.add("$L($S.equals(cln) && $L) {\n", prefix, k.local(), nsMatchExprVar(k.ns(), "cns")).indent();
-            emitChildBody(cb, entry.getValue(), registry, converterRefs);
+            cb.add("$L($S.equals($L) && $L) {\n", prefix, k.local(), lnVar, nsMatchExprVar(k.ns(), nsVar)).indent();
+            emitPredicateBranches(cb, entry.getValue(), registry, converterRefs);
             cb.unindent().add("}\n");
         }
         cb.add("else {\n").indent();
@@ -781,7 +833,7 @@ final class Emitter {
 
     /** Per-emitter trie node (separate from Classifier's: fewer constraints). */
     private static final class TrieNode {
-        final Map<Model.QKey, TrieNode> children = new LinkedHashMap<>();
+        final Map<Model.EdgeKey, TrieNode> children = new LinkedHashMap<>();
         final List<AttrEntry> attrEntries = new ArrayList<>();
         final List<Model.FieldSpec> textEntries = new ArrayList<>();
         final List<Model.FieldSpec> nestedEntries = new ArrayList<>();
@@ -794,7 +846,8 @@ final class Emitter {
         int i = 0;
         for (; i < segments.size(); i++) {
             if (!(segments.get(i) instanceof Model.PathSeg.Element e)) break;
-            node = node.children.computeIfAbsent(new Model.QKey(e.ns(), e.name()), k -> new TrieNode());
+            Model.EdgeKey edge = new Model.EdgeKey(new Model.QKey(e.ns(), e.name()), e.predicate());
+            node = node.children.computeIfAbsent(edge, k -> new TrieNode());
         }
         if (i == segments.size()) {
             if (f.coerce() instanceof Model.Coerce.Nested) node.nestedEntries.add(f);
@@ -802,5 +855,93 @@ final class Emitter {
         } else if (i == segments.size() - 1 && segments.get(i) instanceof Model.PathSeg.AttrLeaf al) {
             node.attrEntries.add(new AttrEntry(al.ns(), al.name(), f));
         }
+    }
+
+    /** Group children of one trie node by base QKey, collecting predicate variants. */
+    private LinkedHashMap<Model.QKey, List<Map.Entry<xmlfluss.path.Predicate, TrieNode>>> groupChildrenByQKey(TrieNode node) {
+        LinkedHashMap<Model.QKey, List<Map.Entry<xmlfluss.path.Predicate, TrieNode>>> grouped = new LinkedHashMap<>();
+        for (var entry : node.children.entrySet()) {
+            Model.EdgeKey edge = entry.getKey();
+            grouped.computeIfAbsent(edge.qkey(), k -> new ArrayList<>())
+                    .add(new java.util.AbstractMap.SimpleEntry<>(edge.predicate(), entry.getValue()));
+        }
+        return grouped;
+    }
+
+    /**
+     * Two-pass dispatch when predicate variants overlap on the same element:
+     *  1. attr-only reads run for EVERY matching predicate (childAttr is a pure lookup, no
+     *     element consumption). Without this, paths like
+     *       link[@type='epub']/@href
+     *       link[@type='epub'][@rel='acq']/@href
+     *     would race and only the first matching arm would fire.
+     *  2. Body-consuming variants (text / nested / descend) dispatch first-match-wins —
+     *     a single element body can only be consumed once.
+     */
+    private void emitPredicateBranches(CodeBlock.Builder cb,
+                                       List<Map.Entry<xmlfluss.path.Predicate, TrieNode>> branches,
+                                       Model.NestedRegistry registry,
+                                       Map<String, ConverterRef> converterRefs) {
+        if (branches.size() == 1 && branches.get(0).getKey() == null) {
+            emitChildBody(cb, branches.get(0).getValue(), registry, converterRefs);
+            return;
+        }
+        for (var entry : branches) {
+            TrieNode child = entry.getValue();
+            if (child.attrEntries.isEmpty()) continue;
+            xmlfluss.path.Predicate pred = entry.getKey();
+            CodeBlock cond = pred == null ? CodeBlock.of("true") : predicateExpr(pred);
+            cb.add("if ($L) {\n", cond).indent();
+            emitAttrEntries(cb, child);
+            cb.unindent().add("}\n");
+        }
+        List<Map.Entry<xmlfluss.path.Predicate, TrieNode>> bodyBranches = new ArrayList<>();
+        for (var entry : branches) {
+            if (nodeHasBodyContent(entry.getValue())) bodyBranches.add(entry);
+        }
+        if (bodyBranches.isEmpty()) {
+            cb.addStatement("c.skipChild()");
+            return;
+        }
+        boolean first = true;
+        for (var entry : bodyBranches) {
+            xmlfluss.path.Predicate pred = entry.getKey();
+            String prefix = first ? "if " : "else if ";
+            first = false;
+            CodeBlock cond = pred == null ? CodeBlock.of("true") : predicateExpr(pred);
+            cb.add("$L($L) {\n", prefix, cond).indent();
+            emitChildBodyContent(cb, entry.getValue(), registry, converterRefs);
+            cb.unindent().add("}\n");
+        }
+        cb.add("else {\n").indent();
+        cb.addStatement("c.skipChild()");
+        cb.unindent().add("}\n");
+    }
+
+    private static boolean nodeHasBodyContent(TrieNode node) {
+        return !node.textEntries.isEmpty() || !node.nestedEntries.isEmpty() || !node.children.isEmpty();
+    }
+
+    /** Render a {@link xmlfluss.path.Predicate} as a Java boolean expression over {@code c.childAttr}. */
+    private CodeBlock predicateExpr(xmlfluss.path.Predicate p) {
+        if (p instanceof xmlfluss.path.Predicate.AttrEq ae) {
+            String ns = ae.getName().getNs();
+            CodeBlock nsLit = ns == null ? CodeBlock.of("null") : CodeBlock.of("$S", ns);
+            String local = ae.getName().getLocal();
+            String value = ae.getValue();
+            if (ae.getNegate()) {
+                // Mirror PathMatcher: missing attr satisfies !=, present-and-different also satisfies.
+                return CodeBlock.of("(c.childAttr($L, $S) == null || !$S.equals(c.childAttr($L, $S)))",
+                        nsLit, local, value, nsLit, local);
+            }
+            return CodeBlock.of("($S.equals(c.childAttr($L, $S)))", value, nsLit, local);
+        }
+        if (p instanceof xmlfluss.path.Predicate.And and) {
+            return CodeBlock.of("($L && $L)", predicateExpr(and.getL()), predicateExpr(and.getR()));
+        }
+        if (p instanceof xmlfluss.path.Predicate.Or or) {
+            return CodeBlock.of("($L || $L)", predicateExpr(or.getL()), predicateExpr(or.getR()));
+        }
+        throw new IllegalStateException("Index predicate not supported in @XmlChild; rejected at validation");
     }
 }

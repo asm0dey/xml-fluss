@@ -315,4 +315,25 @@ final class ErrorTest {
                 """;
         assertRejected("malformed", src);
     }
+
+    @Test
+    void rejectsPositionalPredicateInsideXmlChildWithFixSuggestion() {
+        // `x/i[@k='v'][2]` exercises the user's exact shape: chained attr + positional inside
+        // an @XmlChild path. Validator must reject AND surface a fix hint.
+        String src = """
+                package sample;
+                import xmlfluss.XmlChild;
+                import xmlfluss.XmlRecord;
+                @XmlRecord(path = "//doc")
+                public record Doc(@XmlChild(path = "x/i[@k='v'][2]") String s) {}
+                """;
+        AptTestHarness.CompileResult r = AptTestHarness.procOnly(src);
+        assertFalse(r.ok(), "expected compilation failure but processor accepted source:\n" + r.joined());
+        assertTrue(r.hasError("positional predicate [2] is not supported inside @XmlChild"),
+                "expected rejection diagnostic, got:\n" + r.joined());
+        assertTrue(r.hasError("Move the positional filter to @XmlRecord"),
+                "expected fix hint pointing to @XmlRecord, got:\n" + r.joined());
+        assertTrue(r.hasError("collect siblings into a List<T>"),
+                "expected fix hint pointing to List<T> + post-parse filter, got:\n" + r.joined());
+    }
 }

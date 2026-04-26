@@ -833,6 +833,29 @@ class XmlDslProcessorErrorTest {
     }
 
     @Test
+    fun positionalPredicateInsideXmlChildRejectedWithFixSuggestion() {
+        // `x/i[@k='v'][2]` exercises the user's exact shape: chained attr + positional inside
+        // an @XmlChild path. Validator must reject AND surface a fix hint.
+        val src = SourceFile.kotlin(
+            "IndexInChild.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord(path = "//doc")
+            data class Doc(@XmlChild(path = "x/i[@k='v'][2]") val s: String?)
+            """.trimIndent(),
+        )
+        assertFailsWith(
+            src,
+            "positional predicate [2] is not supported inside @XmlChild",
+            "Move the positional filter to @XmlRecord",
+            "collect siblings into a List<T>",
+        )
+    }
+
+    @Test
     fun xmlFormatOnConverterFieldRejectedViaMap() {
         val src = SourceFile.kotlin(
             "MapWithFormat.kt",

@@ -42,6 +42,8 @@ class ShowcaseTest {
             </m:royalty>
             <regional region="US"><amount>79.95</amount></regional>
             <regional region="EU"><amount>75.00</amount></regional>
+            <link type="application/atom+xml" rel="self" href="compilers.atom"/>
+            <link type="application/epub+zip" rel="http://opds-spec.org/acquisition" href="compilers.epub"/>
           </lib:book>
           <lib:book id="b-200">
             <title>Algorithms</title>
@@ -53,6 +55,7 @@ class ShowcaseTest {
             <m:price currency="USD">59.00</m:price>
             <published>2011-03-19</published>
             <rating>***</rating>
+            <link type="application/atom+xml" rel="self" href="algorithms.atom"/>
           </lib:book>
         </lib:catalog>
     """.trimIndent()
@@ -85,6 +88,14 @@ class ShowcaseTest {
         assertEquals(BigDecimal("79.95"), b1.regionalPrice["US"])
         assertEquals(BigDecimal("75.00"), b1.regionalPrice["EU"])
 
+        // Predicate-filtered child attributes: pull href + rel from the <link> whose
+        // type matches application/epub+zip; sibling atom link binds via a separate predicate.
+        assertEquals("compilers.epub", b1.epubHref)
+        assertEquals("http://opds-spec.org/acquisition", b1.epubRel)
+        assertEquals("compilers.atom", b1.atomHref)
+        // Chained predicate: only the link matching BOTH type AND rel.
+        assertEquals("compilers.epub", b1.acquisitionEpubHref)
+
         val b2 = books[1]
         assertEquals("b-200", b2.id)
         assertNull(b2.lang)
@@ -96,6 +107,11 @@ class ShowcaseTest {
         assertTrue(b2.royalties.isEmpty())
         assertTrue(b2.regionalPrice.isEmpty())
         assertEquals(3, b2.rating)
+        // No epub link on the second book → predicate misses, both attribute leaves null.
+        assertNull(b2.epubHref)
+        assertNull(b2.epubRel)
+        assertEquals("algorithms.atom", b2.atomHref)
+        assertNull(b2.acquisitionEpubHref)
     }
 
     @Test
@@ -125,6 +141,11 @@ class ShowcaseTest {
         assertEquals(BigDecimal("79.95"), b1.regionalPrice()["US"])
         assertEquals(BigDecimal("75.00"), b1.regionalPrice()["EU"])
 
+        assertEquals("compilers.epub", b1.epubHref())
+        assertEquals("http://opds-spec.org/acquisition", b1.epubRel())
+        assertEquals("compilers.atom", b1.atomHref())
+        assertEquals("compilers.epub", b1.acquisitionEpubHref())
+
         val b2 = books[1]
         assertEquals("b-200", b2.id())
         assertNull(b2.lang())
@@ -136,5 +157,9 @@ class ShowcaseTest {
         assertTrue(b2.royalties().isEmpty())
         assertTrue(b2.regionalPrice().isEmpty())
         assertEquals(3, b2.rating())
+        assertNull(b2.epubHref())
+        assertNull(b2.epubRel())
+        assertEquals("algorithms.atom", b2.atomHref())
+        assertNull(b2.acquisitionEpubHref())
     }
 }

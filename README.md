@@ -157,7 +157,8 @@ Mini-XPath subset, parsed by `xmlfluss.path.PathParser`:
 | `//author` | descendant axis — match anywhere | `@XmlRecord`, `@XmlChild` |
 | `/library/section/author` | absolute path from document root | `@XmlRecord` |
 | `authors/author` | relative path (auto-prepended `//`) | `@XmlRecord` |
-| `//author[@role='main']` | predicate filter | `@XmlRecord` |
+| `//author[@role='main']` | predicate filter | `@XmlRecord`, `@XmlChild` |
+| `link[@type='application/epub+zip']/@href` | predicate on a child element + attribute leaf | `@XmlChild`, `@XmlMap` key/value |
 | `{uri}local` | namespaced via Clark notation | `@XmlRecord` |
 | `atom:entry`, `atom:title` | namespaced via `@XmlNs` prefix | `@XmlRecord`, `@XmlChild`, `@XmlMap` |
 | `//{*}author` | any namespace | `@XmlRecord` |
@@ -171,7 +172,7 @@ Path grammar:
 
 ```
 path       := ('//' | '/')? step ( ('/' | '//') step )* ('/@' qname)?
-step       := qname ('[' predicate ']')?
+step       := qname ('[' predicate ']')*           // chained brackets: implicit AND
 qname      := (ncname ':')? ncname
 predicate  := term (('and'|'or') term)*
 term       := '@' qname ('=' | '!=') quoted-string | integer
@@ -267,6 +268,7 @@ Combine terms using `and` or `or`. Parentheses are not currently supported, and 
 | Position | `integer` | `[1]` |
 | Logical AND | `and` | `[@a='1' and @b='2']` |
 | Logical OR | `or` | `[@a='1' or @a='2']` |
+| Chained brackets | `[a][b]` (implicit AND) | `[@kind='post'][2]` |
 | Namespaces | `prefix:attr` | `[@xml:lang='en']` |
 
 #### Streaming constraints
@@ -274,6 +276,58 @@ Since predicates are evaluated at the moment the parser encounters the opening t
 - Only attributes of the current element can be used in predicates.
 - Text content or nested child elements cannot be used as filters (e.g., `author[name='Ada']` is NOT supported).
 - Position `[N]` refers to the count of siblings with the *same name* encountered so far under the current parent.
+
+#### Predicates inside `@XmlChild`
+
+Attribute predicates (`[@attr='v']`, `[@a='1' and @b='2']`, `[@a='1' or @a='2']`, `[@a!='v']`)
+work on every element segment of an `@XmlChild` path, both direct and `//` descendant. Combine
+them with an attribute leaf to extract a specific attribute from a filtered child:
+
+```kotlin
+@XmlRecord(path = "//entry")
+data class CatalogEntry(
+    @XmlChild(path = "title")                                            val title: String,
+    @XmlChild(path = "link[@type='application/epub+zip']/@href")         val epubHref: String?,
+    @XmlChild(path = "link[@type='application/epub+zip']/@rel")          val epubRel: String?,
+    @XmlChild(path = "//link[@type='application/epub+zip']/@href")       val anyEpubHref: List<String>,
+)
+```
+
+Java mapping is mechanical:
+
+```java
+@XmlRecord(path = "//entry")
+public record JCatalogEntry(
+    @XmlChild(path = "title") @NonNull String title,
+    @XmlChild(path = "link[@type='application/epub+zip']/@href") @Nullable String epubHref,
+    @XmlChild(path = "link[@type='application/epub+zip']/@rel")  @Nullable String epubRel
+) {}
+```
+
+Multiple `@XmlChild` paths sharing a head element with different predicates compile into a
+single `when(localName)` arm. **Attr-leaf tails** (`/@attr`) on overlapping predicates all
+fire — every matching variant reads its attribute. **Body-consuming tails** (text, nested
+data class, deeper element walk) on overlapping predicates dispatch first-match-wins,
+because an XML element body can only be consumed once. Keep predicates mutually exclusive
+when you have body content under the predicate.
+
+Position predicates (`[N]`) are **not** supported inside `@XmlChild` (they would require
+per-name sibling counters across the cursor surface) — they remain `@XmlRecord`-only.
+Trying to use one inside `@XmlChild` fails at compile time with a message that points to
+the two valid alternatives:
+
+```
+@XmlChild path 'x/i[@k='v'][2]' for 's': positional predicate [2] is not supported
+inside @XmlChild. Move the positional filter to @XmlRecord (e.g. @XmlRecord("//... [2]"))
+or collect siblings into a List<T> field and pick by index in your code.
+```
+
+Chained brackets (`step[a][b]`) compose with implicit AND in any path — `@XmlRecord`
+record paths or `@XmlChild` field paths. Note this is **not** standard XPath semantics:
+in XPath, `node[a][2]` filters by `a` first and takes the 2nd of the filtered set. xml-fluss
+treats `[a][2]` as `[a and 2]` — the position counter walks all same-named siblings, then
+the attribute filter applies. Use a single bracket with explicit `and` to keep the
+distinction explicit.
 
 ### 4. Scalars, temporals, BigDecimal
 

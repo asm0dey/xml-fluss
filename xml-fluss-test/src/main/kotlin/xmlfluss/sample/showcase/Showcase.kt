@@ -8,6 +8,8 @@ import java.time.LocalDate
  * KSP showcase exercising every advanced feature on one record:
  *   - two namespaces (lib + m) with prefixes
  *   - multi-segment, descendant axis, and attribute-leaf @XmlChild paths
+ *   - predicate-filtered @XmlChild (epubHref / epubRel / atomHref) — pick attributes off
+ *     the <link> whose type matches a specific MIME, ignore siblings
  *   - polymorphic tag-mode (Format) with three subtypes
  *   - nested record (Money) and List<nested> (Author)
  *   - @XmlMap with a nested-record key and List<nested-record> value
@@ -59,4 +61,10 @@ data class Book(
     val royalties: Map<Money, List<Author>>,
     @XmlMap(entry = "regional", key = "@region", value = "amount")
     val regionalPrice: Map<String, BigDecimal>,
+    @XmlChild(path = "link[@type='application/epub+zip']/@href") val epubHref: String?,
+    @XmlChild(path = "link[@type='application/epub+zip']/@rel") val epubRel: String?,
+    @XmlChild(path = "link[@type='application/atom+xml']/@href") val atomHref: String?,
+    // Chained-bracket predicate: implicit AND of two attribute checks.
+    @XmlChild(path = "link[@type='application/epub+zip'][@rel='http://opds-spec.org/acquisition']/@href")
+    val acquisitionEpubHref: String?,
 )

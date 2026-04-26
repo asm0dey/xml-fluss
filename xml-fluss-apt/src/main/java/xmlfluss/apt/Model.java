@@ -2,6 +2,7 @@ package xmlfluss.apt;
 
 import com.palantir.javapoet.ClassName;
 import com.palantir.javapoet.TypeName;
+import xmlfluss.path.Predicate;
 
 import javax.lang.model.element.TypeElement;
 import java.util.*;
@@ -18,9 +19,14 @@ final class Model {
 
     /** A single segment of a multi-segment {@code @XmlChild} path. */
     sealed interface PathSeg permits PathSeg.Element, PathSeg.AttrLeaf {
-        record Element(String ns, String name) implements PathSeg {}
+        record Element(String ns, String name, Predicate predicate) implements PathSeg {
+            public Element(String ns, String name) { this(ns, name, null); }
+        }
         record AttrLeaf(String ns, String name) implements PathSeg {}
     }
+
+    /** Composite trie key including an optional predicate to disambiguate sibling branches. */
+    record EdgeKey(QKey qkey, Predicate predicate) {}
 
     /** What XML thing the field reads from. {@code ns} is the resolved namespace URI or {@code null}. */
     sealed interface Source permits Source.Attr, Source.Child, Source.Text, Source.MapEntry, Source.PolyChild {

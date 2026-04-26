@@ -27,6 +27,7 @@ subprojects {
 
 dependencies {
     jacocoAggregation(project(":xml-fluss-ksp"))
+    jacocoAggregation(project(":xml-fluss-apt"))
     jacocoAggregation(project(":xml-fluss-runtime"))
     jacocoAggregation(project(":xml-fluss-test"))
 }

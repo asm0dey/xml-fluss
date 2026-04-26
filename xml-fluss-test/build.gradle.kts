@@ -1,6 +1,7 @@
 plugins {
     kotlin("jvm")
     id("com.google.devtools.ksp")
+    `java-library`
 }
 
 kotlin {
@@ -10,9 +11,16 @@ kotlin {
     }
 }
 
+java {
+    toolchain {
+        languageVersion.set(JavaLanguageVersion.of(17))
+    }
+}
+
 dependencies {
     implementation(project(":xml-fluss-runtime"))
     ksp(project(":xml-fluss-ksp"))
+    annotationProcessor(project(":xml-fluss-apt"))
 
     testImplementation(kotlin("test-junit5"))
     testImplementation("org.junit.jupiter:junit-jupiter:6.0.3")
@@ -21,4 +29,8 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+}
+
+kotlin.sourceSets.named("main") {
+    kotlin.setSrcDirs(listOf("src/main/kotlin"))
 }

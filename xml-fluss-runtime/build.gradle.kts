@@ -26,7 +26,9 @@ tasks.withType<Test> { useJUnitPlatform() }
 mavenPublishing {
     configure(JavaLibrary(javadocJar = JavadocJar.Dokka("dokkaGeneratePublicationJavadoc"), sourcesJar = SourcesJar.Sources()))
     publishToMavenCentral(automaticRelease = true)
-    signAllPublications()
+    if (project.findProperty("signingInMemoryKey") != null) {
+        signAllPublications()
+    }
 
     coordinates(project.group.toString(), project.name, project.version.toString())
 

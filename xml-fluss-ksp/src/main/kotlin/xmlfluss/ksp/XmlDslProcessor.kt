@@ -504,9 +504,9 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
                     vRequire(s.name.ns != PathParser.WILDCARD) {
                         "@XmlChild path '$path' for '$fieldName': wildcard namespace '{*}' is not supported"
                     }
-                    val pred = s.predicate
-                    if (pred != null) validateChildPredicate(pred, path, fieldName)
-                    out += PathSeg.Element(s.name.ns, s.name.local, pred)
+                    val brackets = s.brackets
+                    for (b in brackets) validateChildPredicate(b, path, fieldName)
+                    out += PathSeg.Element(s.name.ns, s.name.local, brackets)
                 }
                 is PathStep.AttrLeaf -> {
                     out += PathSeg.AttrLeaf(s.name.ns, s.name.local)
@@ -1553,7 +1553,13 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
     enum class Ctx { RECORD, SUBRECORD }
 
     sealed class PathSeg {
-        data class Element(val ns: String?, val name: String, val predicate: PathPredicate? = null) : PathSeg()
+        data class Element(
+            val ns: String?,
+            val name: String,
+            val brackets: List<PathPredicate> = emptyList(),
+        ) : PathSeg() {
+            val predicate: PathPredicate? get() = brackets.reduceOrNull { a, b -> PathPredicate.And(a, b) }
+        }
         data class AttrLeaf(val ns: String?, val name: String) : PathSeg()
     }
 

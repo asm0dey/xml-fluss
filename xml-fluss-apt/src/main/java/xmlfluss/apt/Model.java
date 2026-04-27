@@ -19,8 +19,15 @@ final class Model {
 
     /** A single segment of a multi-segment {@code @XmlChild} path. */
     sealed interface PathSeg permits PathSeg.Element, PathSeg.AttrLeaf {
-        record Element(String ns, String name, Predicate predicate) implements PathSeg {
-            public Element(String ns, String name) { this(ns, name, null); }
+        record Element(String ns, String name, List<Predicate> brackets) implements PathSeg {
+            public Element(String ns, String name) { this(ns, name, List.of()); }
+            /** Folded view for callers that don't care about bracket order yet. */
+            public Predicate foldedPredicate() {
+                if (brackets.isEmpty()) return null;
+                Predicate acc = brackets.get(0);
+                for (int i = 1; i < brackets.size(); i++) acc = new Predicate.And(acc, brackets.get(i));
+                return acc;
+            }
         }
         record AttrLeaf(String ns, String name) implements PathSeg {}
     }

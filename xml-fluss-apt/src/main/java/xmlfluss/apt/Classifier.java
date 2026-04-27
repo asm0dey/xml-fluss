@@ -653,9 +653,9 @@ final class Classifier {
                             + "': wildcard namespace '{*}' is not supported");
                     throw new ClassifierException("wildcard ns " + fieldName);
                 }
-                Predicate pred = named.getPredicate();
-                if (pred != null) validateChildPredicate(pred, path, fieldName, where);
-                segs.add(new Model.PathSeg.Element(named.getName().getNs(), named.getName().getLocal(), pred));
+                List<Predicate> brackets = named.getBrackets();
+                for (Predicate b : brackets) validateChildPredicate(b, path, fieldName, where);
+                segs.add(new Model.PathSeg.Element(named.getName().getNs(), named.getName().getLocal(), brackets));
             }
         }
         return new Model.Source.Child(segs, descendant);
@@ -808,7 +808,7 @@ final class Classifier {
         int i = 0;
         for (; i < segments.size(); i++) {
             if (!(segments.get(i) instanceof Model.PathSeg.Element e)) break;
-            Model.EdgeKey edge = new Model.EdgeKey(new Model.QKey(e.ns(), e.name()), e.predicate());
+            Model.EdgeKey edge = new Model.EdgeKey(new Model.QKey(e.ns(), e.name()), e.foldedPredicate());
             node = node.children.computeIfAbsent(edge, k -> new TrieNode());
         }
         if (i == segments.size()) {

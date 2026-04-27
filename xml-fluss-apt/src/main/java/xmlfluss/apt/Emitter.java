@@ -360,7 +360,7 @@ final class Emitter {
         for (Model.FieldSpec f : descendantFields) {
             Model.PathSeg.Element head = (Model.PathSeg.Element) ((Model.Source.Child) f.source()).segments().get(0);
             byHead.computeIfAbsent(new Model.QKey(head.ns(), head.name()), k -> new ArrayList<>())
-                    .add(new java.util.AbstractMap.SimpleEntry<>(head.predicate(), f));
+                    .add(new java.util.AbstractMap.SimpleEntry<>(head.foldedPredicate(), f));
         }
 
         boolean first = true;
@@ -846,7 +846,7 @@ final class Emitter {
         int i = 0;
         for (; i < segments.size(); i++) {
             if (!(segments.get(i) instanceof Model.PathSeg.Element e)) break;
-            Model.EdgeKey edge = new Model.EdgeKey(new Model.QKey(e.ns(), e.name()), e.predicate());
+            Model.EdgeKey edge = new Model.EdgeKey(new Model.QKey(e.ns(), e.name()), e.foldedPredicate());
             node = node.children.computeIfAbsent(edge, k -> new TrieNode());
         }
         if (i == segments.size()) {

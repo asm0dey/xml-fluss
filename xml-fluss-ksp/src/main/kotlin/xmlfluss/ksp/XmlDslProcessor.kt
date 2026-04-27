@@ -67,6 +67,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
 
         for (cls in symbols) {
             try {
+                // Build the field model and emit `<Cls>Parser.kt` for this record.
                 generate(cls)
             } catch (e: ProcessorValidationException) {
                 logger.error("xml-fluss-ksp: ${e.message}", cls)
@@ -84,18 +85,23 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         }
         // cls came from resolver.getSymbolsWithAnnotation(XML_RECORD_FQ); annotation is guaranteed
         // present. XmlRecord.path is a non-null String. data classes always carry a primary ctor.
+        // Pull the @XmlRecord annotation mirror and read its `path = "..."` argument.
         val recordAnn = annotationOf(cls, XML_RECORD_FQ)!!
         val recordPath = stringArg(recordAnn, "path")!!
+        // Collect every @XmlNs(prefix=, uri=) declared on the class into a prefix→uri map.
         val nsMap = collectNs(cls)
         val ctor = cls.primaryConstructor!!
 
         val registry = NestedTypeRegistry()
+        // Classify each ctor parameter into a FieldSpec (Attr/Child/Text/Map source, target type, converter, etc.).
         val fields = ctor.parameters.map { classifyParam(cls, it, nsMap, registry) }
         if (fields.count { it.source is Source.Text } > 1) {
             vError("${cls.qualifiedName?.asString()}: multiple @XmlText fields not allowed")
         }
+        // Cross-field path checks: ambiguous overlaps, descendant-leaf vs subpath conflicts, predicate sanity.
         validateChildPaths(cls, fields)
 
+        // Generate `<Cls>Parser.kt` from the FieldSpec list and write it via the KSP code generator.
         emitFile(cls, recordPath, nsMap, fields, registry)
     }
 
@@ -552,6 +558,9 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
                 validateChildPredicate(p.r, path, fieldName, onDescendantHead)
             }
             is PathPredicate.Or -> {
+                vRequire(!containsIndex(p.l) && !containsIndex(p.r)) {
+                    "@XmlChild path '$path' for '$fieldName': positional predicate inside 'or' is not supported. Use chained brackets ('[@x=\"v\"][N]') or 'and' to combine filters."
+                }
                 validateChildPredicate(p.l, path, fieldName, onDescendantHead)
                 validateChildPredicate(p.r, path, fieldName, onDescendantHead)
             }
@@ -1288,6 +1297,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             return plainPredicateExpr(folded)
         }
         val firstIdxIndex = brackets.indexOfFirst { containsIndex(it) }
+        // unreachable: bracketsHaveIndex returned true, so at least one bracket contains Index.
         require(firstIdxIndex >= 0) { "predicateExpr called with no Index in brackets — bug in bracketsHaveIndex" }
         val prefix = brackets.subList(0, firstIdxIndex)
         val firstIdxBracket = brackets[firstIdxIndex]
@@ -1295,6 +1305,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         val n = firstIndexValue(firstIdxBracket)
         val slotKey = PrefixKey(qkey, prefix)
         val slotName = slots[slotKey]
+            // unreachable: declareCounterSlots populates every (qkey, prefix) pair we encounter.
             ?: error("missing counter slot for $slotKey at qkey=$qkey — bug in counter detection")
         val parts = mutableListOf<CodeBlock>()
         // When the prefix is empty there is no __pre_ variable — the counter is always incremented.
@@ -1328,6 +1339,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         }
         is PathPredicate.And -> CodeBlock.of("(%L && %L)", plainPredicateExpr(p.l), plainPredicateExpr(p.r))
         is PathPredicate.Or -> CodeBlock.of("(%L || %L)", plainPredicateExpr(p.l), plainPredicateExpr(p.r))
+        // unreachable: caller routes Index-bearing brackets through predicateExpr; stripIndex removes Index nodes from And residuals before recursion.
         is PathPredicate.Index -> error("plainPredicateExpr called on Index — counter logic should have stripped this")
     }
 
@@ -1351,7 +1363,9 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
     private fun firstIndexValue(p: PathPredicate): Int = when (p) {
         is PathPredicate.Index -> p.n
         is PathPredicate.And -> if (containsIndex(p.l)) firstIndexValue(p.l) else firstIndexValue(p.r)
+        // unreachable: validateChildPredicate rejects Or that contains Index, so no Or reaches this point.
         is PathPredicate.Or -> error("Index inside Or predicate is not supported (predicate=$p)")
+        // unreachable: invoked only on brackets where containsIndex returned true; the And arm walks toward the Index so a pure-AttrEq leaf is never the direct argument.
         is PathPredicate.AttrEq -> error("firstIndexValue: predicate has no Index ($p)")
     }
 
@@ -1372,10 +1386,8 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
                 else -> PathPredicate.And(l, r)
             }
         }
-        is PathPredicate.Or -> {
-            // If we ever reach here, containsIndex(p) was true — caught earlier.
-            error("Index inside Or predicate is not supported (predicate=$p)")
-        }
+        // unreachable: stripIndex is only called on Index-bearing brackets, and validateChildPredicate rejects Or that contains Index upstream.
+        is PathPredicate.Or -> error("Index inside Or predicate is not supported (predicate=$p)")
     }
 
     private fun slotName(qkey: QKey, ordinal: Int): String {

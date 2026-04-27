@@ -66,14 +66,20 @@ final class Classifier {
             error(element, "@XmlRecord requires a record type, got " + element.getKind());
             throw new ClassifierException("not a record: " + element);
         }
+        // Gather every @XmlNs(prefix=, uri=) on the class into a prefix→uri map used to resolve
+        // namespaced QNames in @XmlAttr/@XmlChild paths and the @XmlRecord path itself.
         Map<String, String> nsMap = collectOwnNs(element);
+        // Read the @XmlRecord(path = "...") string from the element's annotation mirror.
         String path = readRecordPath(element);
         try {
+            // Eagerly compile the record path against the runtime path parser so syntax errors
+            // surface as a single ERROR diagnostic instead of a stack trace at codegen time.
             xmlfluss.runtime.Paths.INSTANCE.compile(path, nsMap);
         } catch (RuntimeException ex) {
             error(element, "@XmlRecord path '" + path + "' is invalid: " + ex.getMessage());
             throw new ClassifierException("bad record path");
         }
+        // Walk the record's components, classify each into a FieldSpec, and run cross-field validation.
         return classify(element, path, nsMap);
     }
 
@@ -85,6 +91,9 @@ final class Classifier {
         List<? extends RecordComponentElement> components = element.getRecordComponents();
         List<Model.FieldSpec> fields = new ArrayList<>(components.size());
 
+        // Locate the record's canonical constructor (parameter types match the component types in order)
+        // so per-parameter annotations can be inspected — annotations on ctor params are not always
+        // mirrored onto the record component itself depending on @Target.
         ExecutableElement canonicalCtor = findCanonicalConstructor(element, components);
 
         int textCount = 0;
@@ -94,6 +103,8 @@ final class Classifier {
         for (int i = 0; i < components.size(); i++) {
             RecordComponentElement rc = components.get(i);
             VariableElement ctorParam = canonicalCtor != null ? canonicalCtor.getParameters().get(i) : null;
+            // Inspect this component's annotations and Java type, register any nested record type
+            // into the shared NestedRegistry, and produce a FieldSpec describing source/target/coercion.
             Model.FieldSpec spec = classifyComponent(element, rc, ctorParam, nsMap);
             fields.add(spec);
             if (spec.source() instanceof Model.Source.Text) {
@@ -114,6 +125,8 @@ final class Classifier {
             }
         }
 
+        // Cross-field path checks: ambiguous overlaps between @XmlChild paths, predicate sanity,
+        // descendant-leaf vs subpath conflicts on the same head element.
         validateChildPaths(element, fq, fields);
 
         return new Model.RecordSpec(element, pkg, simple, recordPath, nsMap, fields);

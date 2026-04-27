@@ -66,6 +66,7 @@ final class Emitter {
                 .addModifiers(Modifier.PRIVATE)
                 .build());
 
+        // Static `Map<String,String> NS` initializer mirroring @XmlNs declarations on the record.
         cls.addField(buildNsField(topLevel.nsMap()));
 
         cls.addField(FieldSpec.builder(CN_COMPILED_PATH, "PATH", Modifier.PRIVATE, Modifier.STATIC, Modifier.FINAL)
@@ -73,6 +74,7 @@ final class Emitter {
                         CN_PATHS, topLevel.recordPath())
                 .build());
 
+        // Walk every field (top-level + nested) and intern each unique @XmlConverter class as a static singleton field.
         Map<String, ConverterRef> converterRefs = collectConverters(topLevel, registry);
         for (ConverterRef ref : converterRefs.values()) {
             cls.addField(FieldSpec.builder(ref.cls, ref.varName,
@@ -95,6 +97,7 @@ final class Emitter {
                 .addParameter(CN_INPUT_STREAM, "input")
                 .addParameter(TypeName.BOOLEAN, "ignoreNamespace")
                 .returns(streamOfRecord);
+        // Generate the public `parse(InputStream, boolean)` body: open Stax cursor, mount PATH, drive a Spliterator that yields one record per match.
         emitParseBody(parse, recordType);
         cls.addMethod(parse.build());
 
@@ -102,6 +105,7 @@ final class Emitter {
                 .addModifiers(Modifier.PRIVATE, Modifier.STATIC)
                 .addParameter(CN_CURSOR, "c")
                 .returns(recordType);
+        // Generate per-field state, the forEachSubrecordChild dispatch over @XmlAttr/@XmlChild/@XmlText/@XmlMap, and the canonical-ctor invocation that returns the record instance.
         buildOne.addCode(buildInstanceBody(recordType, topLevel.fields(), registry,
                 converterRefs, /*record=*/true));
         cls.addMethod(buildOne.build());
@@ -115,6 +119,7 @@ final class Emitter {
                     .addModifiers(Modifier.PRIVATE, Modifier.STATIC)
                     .addParameter(CN_CURSOR, "c")
                     .returns(nestedType);
+            // Emit a private static helper for each nested record type — same field/dispatch shape as __buildRecord but reused from parent fields that descend into this nested type.
             helperMethod.addCode(buildInstanceBody(nestedType, spec.fields(), registry,
                     converterRefs, /*record=*/false));
             cls.addMethod(helperMethod.build());
@@ -124,6 +129,7 @@ final class Emitter {
                 .skipJavaLangImports(true)
                 .build();
         try {
+            // Hand the assembled JavaFile to the annotation-processing Filer; this is what creates the .java in the generated-sources dir.
             file.writeTo(env.getFiler());
         } catch (IOException ioe) {
             env.getMessager().printMessage(Diagnostic.Kind.ERROR,

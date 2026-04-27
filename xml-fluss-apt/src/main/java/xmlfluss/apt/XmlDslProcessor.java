@@ -42,6 +42,8 @@ public final class XmlDslProcessor extends AbstractProcessor {
                 Classifier classifier = new Classifier(processingEnv, registry);
                 Model.RecordSpec spec;
                 try {
+                    // Walk the record's components, resolve @XmlAttr/@XmlChild/@XmlText/@XmlMap into a RecordSpec,
+                    // collect @XmlNs prefixes, and register nested data-record types into the shared NestedRegistry.
                     spec = classifier.classifyTopLevel(typeElement);
                 } catch (Classifier.ClassifierException ex) {
                     // Validation diagnostics already emitted; skip this record.
@@ -54,6 +56,8 @@ public final class XmlDslProcessor extends AbstractProcessor {
                     continue;
                 }
                 try {
+                    // Code-generate `<Cls>Parser.java` from the RecordSpec — emits the Stream<T> parse(InputStream) entry point
+                    // plus per-field state machines for attr/child/text/map handling, and writes through the Filer.
                     new Emitter(processingEnv).emit(spec, registry);
                 } catch (RuntimeException unexpected) {
                     processingEnv.getMessager().printMessage(

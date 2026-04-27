@@ -275,6 +275,7 @@ class XmlDslProcessorPositiveTest {
                 @XmlMap(entry = "score", key = "@k", value = ".") val s: Map<String, String>,
                 @XmlMap(entry = "tag", key = "@k", value = "@v") val t: Map<String, String>,
                 @XmlMap(entry = "list", key = "@k", value = "v") val l: Map<String, List<String>>,
+                @XmlMap(entry = "alist", key = "@k", value = "@v") val a: Map<String, List<String>>,
             )
             """.trimIndent(),
         )
@@ -396,6 +397,284 @@ class XmlDslProcessorPositiveTest {
             data class Doc(
                 @XmlChild(path = "a") val a: Inner,
                 @XmlChild(path = "b") val b: Inner?,
+            )
+            """.trimIndent(),
+        )
+        assertCompilesOk(src)
+    }
+
+    @Test
+    fun directPositionalChild() {
+        val src = SourceFile.kotlin(
+            "DirectPos.kt",
+            """
+            package sample
+            import xmlfluss.XmlAttr
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            data class ItemSummary(@XmlAttr(name = "id") val id: String)
+
+            @XmlRecord(path = "//feed")
+            data class Doc(@XmlChild(path = "item[2]") val secondItem: ItemSummary)
+            """.trimIndent(),
+        )
+        assertCompilesOk(src)
+    }
+
+    @Test
+    fun chainedAttrThenPositional() {
+        val src = SourceFile.kotlin(
+            "ChainedAttrPos.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord(path = "//feed")
+            data class Doc(
+                @XmlChild(path = "meta[@kind='post'][2]/published") val published: String,
+            )
+            """.trimIndent(),
+        )
+        assertCompilesOk(src)
+    }
+
+    @Test
+    fun positionalThenAttrSuffixOnAttrLeaf() {
+        val src = SourceFile.kotlin(
+            "PosThenAttr.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord(path = "//entry")
+            data class Doc(
+                @XmlChild(path = "link[@type='epub'][2]/@href") val href: String,
+            )
+            """.trimIndent(),
+        )
+        assertCompilesOk(src)
+    }
+
+    @Test
+    fun descendantHeadWithAttrThenDirectPositional() {
+        val src = SourceFile.kotlin(
+            "DescAttrDirectPos.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord(path = "//root")
+            data class Doc(
+                @XmlChild(path = "//x[@a='b']/y[2]") val ys: List<String>,
+            )
+            """.trimIndent(),
+        )
+        assertCompilesOk(src)
+    }
+
+    @Test
+    fun andCombinedIndexAndAttrInSingleBracket() {
+        val src = SourceFile.kotlin(
+            "AndIndexAttr.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord(path = "//feed")
+            data class Doc(
+                @XmlChild(path = "item[2 and @kind='post']/title") val title: String,
+            )
+            """.trimIndent(),
+        )
+        assertCompilesOk(src)
+    }
+
+    @Test
+    fun negatedAttrPredicate() {
+        val src = SourceFile.kotlin(
+            "NegatedAttr.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord(path = "//feed")
+            data class Doc(
+                @XmlChild(path = "item[@kind!='draft']/title") val titles: List<String>,
+            )
+            """.trimIndent(),
+        )
+        assertCompilesOk(src)
+    }
+
+    @Test
+    fun positionalThenAttrSuffixOnDirectChild() {
+        val src = SourceFile.kotlin(
+            "PosThenAttrDirect.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord(path = "//feed")
+            data class Doc(
+                @XmlChild(path = "item[2][@kind='post']/title") val title: String,
+            )
+            """.trimIndent(),
+        )
+        assertCompilesOk(src)
+    }
+
+    @Test
+    fun andCombinedIndexAndTwoAttrs() {
+        val src = SourceFile.kotlin(
+            "AndIndexTwoAttrs.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord(path = "//feed")
+            data class Doc(
+                @XmlChild(path = "item[2 and @kind='post' and @lang='en']/title") val title: String,
+            )
+            """.trimIndent(),
+        )
+        assertCompilesOk(src)
+    }
+
+    @Test
+    fun directChildBothPlainAndPositional() {
+        val src = SourceFile.kotlin(
+            "PlainAndPositional.kt",
+            """
+            package sample
+            import xmlfluss.XmlAttr
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            data class ItemSummary(@XmlAttr(name = "id") val id: String)
+
+            @XmlRecord(path = "//feed")
+            data class Doc(
+                @XmlChild(path = "item") val items: List<ItemSummary>,
+                @XmlChild(path = "item[2]") val secondItem: ItemSummary,
+            )
+            """.trimIndent(),
+        )
+        assertCompilesOk(src)
+    }
+
+    @Test
+    fun descendantHeadGuardedAndUnguardedSibling() {
+        val src = SourceFile.kotlin(
+            "DescGuardedUnguarded.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord(path = "//root")
+            data class Doc(
+                @XmlChild(path = "//x[@a='b']/y") val ys: List<String>,
+                @XmlChild(path = "//x/z") val zs: List<String>,
+            )
+            """.trimIndent(),
+        )
+        assertCompilesOk(src)
+    }
+
+    @Test
+    fun orPredicateWithoutIndex() {
+        val src = SourceFile.kotlin(
+            "OrPredicate.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord(path = "//feed")
+            data class Doc(
+                @XmlChild(path = "item[@kind='post' or @kind='page']/title") val titles: List<String>,
+            )
+            """.trimIndent(),
+        )
+        assertCompilesOk(src)
+    }
+
+    @Test
+    fun andCombinedAttrThenIndexInSingleBracket() {
+        val src = SourceFile.kotlin(
+            "AndAttrThenIndex.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord(path = "//feed")
+            data class Doc(
+                @XmlChild(path = "item[@kind='post' and 2]/title") val title: String,
+            )
+            """.trimIndent(),
+        )
+        assertCompilesOk(src)
+    }
+
+    @Test
+    fun chainedNonIndexBracketsFolded() {
+        val src = SourceFile.kotlin(
+            "ChainedNonIndex.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord(path = "//feed")
+            data class Doc(
+                @XmlChild(path = "item[@kind='post'][@lang='en']/title") val titles: List<String>,
+            )
+            """.trimIndent(),
+        )
+        assertCompilesOk(src)
+    }
+
+    @Test
+    fun andCombinedTwoAttrsNoIndex() {
+        val src = SourceFile.kotlin(
+            "AndTwoAttrsNoIndex.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord(path = "//feed")
+            data class Doc(
+                @XmlChild(path = "item[@kind='post' and @lang='en']/title") val titles: List<String>,
+            )
+            """.trimIndent(),
+        )
+        assertCompilesOk(src)
+    }
+
+    @Test
+    fun nsQualifiedAttrInPredicate() {
+        val src = SourceFile.kotlin(
+            "NsAttrPred.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlNs
+            import xmlfluss.XmlRecord
+
+            @XmlNs(prefix = "x", uri = "urn:x")
+            @XmlRecord(path = "//feed")
+            data class Doc(
+                @XmlChild(path = "item[@x:kind='post']/title") val titles: List<String>,
             )
             """.trimIndent(),
         )

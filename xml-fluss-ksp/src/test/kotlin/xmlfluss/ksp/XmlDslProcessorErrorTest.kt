@@ -894,4 +894,61 @@ class XmlDslProcessorErrorTest {
             "found multiple in 'item'",
         )
     }
+
+    @Test
+    fun cannotMixDescendantLeafWithDescendantSubpath() {
+        val src = SourceFile.kotlin(
+            "MixDescLeafSubpath.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord(path = "//root")
+            data class Doc(
+                @XmlChild(path = "//x") val xs: List<String>,
+                @XmlChild(path = "//x/y") val ys: List<String>,
+            )
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "cannot mix '//x' with '//x/...'")
+    }
+
+    @Test
+    fun multipleDescendantLeafFieldsOnSameHeadRejected() {
+        val src = SourceFile.kotlin(
+            "MultiDescLeaf.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord(path = "//root")
+            data class Doc(
+                @XmlChild(path = "//x") val a: List<String>,
+                @XmlChild(path = "//x") val b: List<String>,
+            )
+            """.trimIndent(),
+        )
+        assertFailsWith(src, "multiple descendant fields targeting '//x'")
+    }
+
+    @Test
+    fun positionalPredicateInsideOrIsRejected() {
+        val src = SourceFile.kotlin(
+            "IndexInsideOr.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord(path = "//doc")
+            data class Doc(@XmlChild(path = "item[2 or @kind='post']") val s: String?)
+            """.trimIndent(),
+        )
+        assertFailsWith(
+            src,
+            "positional predicate inside 'or' is not supported",
+        )
+    }
 }

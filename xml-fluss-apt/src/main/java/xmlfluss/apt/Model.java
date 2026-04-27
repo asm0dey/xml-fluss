@@ -24,19 +24,20 @@ final class Model {
                 java.util.Objects.requireNonNull(brackets, "brackets");
             }
             public Element(String ns, String name) { this(ns, name, List.of()); }
-            /** Folded view for callers that don't care about bracket order yet. */
-            public Predicate foldedPredicate() {
-                if (brackets.isEmpty()) return null;
-                Predicate acc = brackets.get(0);
-                for (int i = 1; i < brackets.size(); i++) acc = new Predicate.And(acc, brackets.get(i));
-                return acc;
-            }
         }
         record AttrLeaf(String ns, String name) implements PathSeg {}
     }
 
-    /** Composite trie key including an optional predicate to disambiguate sibling branches. */
-    record EdgeKey(QKey qkey, Predicate predicate) {}
+    /**
+     * Composite trie key carrying the ordered bracket list to disambiguate sibling branches.
+     * Java records compare lists element-wise via {@link List#equals}; the contained
+     * {@link Predicate} subclasses are Kotlin data classes with structural equality.
+     */
+    record EdgeKey(QKey qkey, List<Predicate> brackets) {
+        public EdgeKey {
+            java.util.Objects.requireNonNull(brackets, "brackets");
+        }
+    }
 
     /** What XML thing the field reads from. {@code ns} is the resolved namespace URI or {@code null}. */
     sealed interface Source permits Source.Attr, Source.Child, Source.Text, Source.MapEntry, Source.PolyChild {

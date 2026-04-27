@@ -833,25 +833,24 @@ class XmlDslProcessorErrorTest {
     }
 
     @Test
-    fun positionalPredicateInsideXmlChildRejectedWithFixSuggestion() {
-        // `x/i[@k='v'][2]` exercises the user's exact shape: chained attr + positional inside
-        // an @XmlChild path. Validator must reject AND surface a fix hint.
+    fun positionalPredicateOnDescendantHeadInsideXmlChildIsRejected() {
+        // `//item[2]` puts the positional predicate on the descendant-axis segment itself.
+        // After the relaxation, only this shape remains rejected.
         val src = SourceFile.kotlin(
-            "IndexInChild.kt",
+            "IndexOnDescHead.kt",
             """
             package sample
             import xmlfluss.XmlChild
             import xmlfluss.XmlRecord
 
             @XmlRecord(path = "//doc")
-            data class Doc(@XmlChild(path = "x/i[@k='v'][2]") val s: String?)
+            data class Doc(@XmlChild(path = "//item[2]") val s: String?)
             """.trimIndent(),
         )
         assertFailsWith(
             src,
-            "positional predicate [2] is not supported inside @XmlChild",
-            "Move the positional filter to @XmlRecord",
-            "collect siblings into a List<T>",
+            "positional predicate [2] is not supported on the descendant-axis segment",
+            "Move the positional filter to a direct-axis segment",
         )
     }
 
@@ -874,5 +873,25 @@ class XmlDslProcessorErrorTest {
             """.trimIndent(),
         )
         assertFailsWith(src, "@XmlFormat / @XmlConverter not supported on @XmlMap field")
+    }
+
+    @Test
+    fun multipleIndexBracketsOnSameSegmentRejected() {
+        val src = SourceFile.kotlin(
+            "MultiIndex.kt",
+            """
+            package sample
+            import xmlfluss.XmlChild
+            import xmlfluss.XmlRecord
+
+            @XmlRecord(path = "//doc")
+            data class Doc(@XmlChild(path = "item[2][3]") val s: String?)
+            """.trimIndent(),
+        )
+        assertFailsWith(
+            src,
+            "only one positional predicate is allowed per segment",
+            "found multiple in 'item'",
+        )
     }
 }

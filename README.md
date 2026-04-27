@@ -311,23 +311,32 @@ data class, deeper element walk) on overlapping predicates dispatch first-match-
 because an XML element body can only be consumed once. Keep predicates mutually exclusive
 when you have body content under the predicate.
 
-Position predicates (`[N]`) are **not** supported inside `@XmlChild` (they would require
-per-name sibling counters across the cursor surface) — they remain `@XmlRecord`-only.
-Trying to use one inside `@XmlChild` fails at compile time with a message that points to
-the two valid alternatives:
+Positional predicates (`[N]`) are accepted on every direct-axis segment of an `@XmlChild`
+path: leaf (`item[2]`), mid (`meta[2]/published`), chained (`meta[@kind='post'][2]/published`),
+every-segment (`section[2]/para[2]/span[1]`), with attribute leaf
+(`link[@type='epub'][2]/@href`), and after a descendant axis (`//x[@a='b']/y[2]`). Each
+positional bracket counts same-name siblings under the parent that already passed every
+earlier bracket, with one counter per `(parent, name, prefix-predicate)` and per-parent
+reset.
+
+The only rejected form is positional applied directly to the descendant-axis segment
+itself (`//x[2]`) — per-parent counter semantics would be ambiguous when "the parent" is
+every ancestor encountered. Compile-time error:
 
 ```
-@XmlChild path 'x/i[@k='v'][2]' for 's': positional predicate [2] is not supported
-inside @XmlChild. Move the positional filter to @XmlRecord (e.g. @XmlRecord("//... [2]"))
-or collect siblings into a List<T> field and pick by index in your code.
+@XmlChild path '//item[2]' for 's': positional predicate [2] is not supported on the
+descendant-axis segment ('//<name>[N]'). Move the positional filter to a direct-axis
+segment (e.g. '//parent/item[2]') or to @XmlRecord.
 ```
+
+Only one positional predicate is allowed per segment; `item[2][3]` is rejected at compile
+time.
 
 Chained brackets (`step[a][b]`) follow standard XPath semantics: brackets evaluate left
 to right, and a positional check inside a later bracket counts only same-name siblings
 under the parent that already passed every earlier bracket. So `[@kind='post'][2]`
 means "the 2nd `<item>` carrying `kind='post'`" — not "the 2nd `<item>` overall, also
-a post". Inside `@XmlChild`, positional brackets remain rejected; chained attribute
-brackets there compose as a plain conjunction.
+a post". This semantic is identical inside `@XmlChild` and `@XmlRecord`.
 
 ### 4. Scalars, temporals, BigDecimal
 

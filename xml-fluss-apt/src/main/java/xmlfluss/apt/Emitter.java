@@ -1,6 +1,7 @@
 package xmlfluss.apt;
 
 import com.palantir.javapoet.*;
+import xmlfluss.path.Predicate;
 
 import javax.annotation.processing.Generated;
 import javax.annotation.processing.ProcessingEnvironment;
@@ -10,6 +11,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -278,8 +280,11 @@ final class Emitter {
                 }
             }
 
+            // Counter slots must be declared OUTSIDE the per-sibling lambda so that ++__cnt[0]
+            // accumulates across siblings rather than resetting per iteration.
+            Map<PrefixKey, String> slots = declareCounterSlots(cb, groupChildrenByQKey(root));
             cb.add("$T.$L(c, (ln, ns) -> {\n", CN_ADAPTER, forEachFn).indent();
-            emitTopLevelChildSwitch(cb, root, descendantFields, mapFields, polyFields, registry, converterRefs, "ln", "ns");
+            emitTopLevelChildSwitch(cb, root, slots, descendantFields, mapFields, polyFields, registry, converterRefs, "ln", "ns");
             cb.unindent().add("});\n");
 
             if (textField != null) {
@@ -344,6 +349,7 @@ final class Emitter {
 
     /** Top-level child dispatch switch shared between record and nested helpers. */
     private void emitTopLevelChildSwitch(CodeBlock.Builder cb, TrieNode directRoot,
+                                         Map<PrefixKey, String> slots,
                                          List<Model.FieldSpec> descendantFields,
                                          List<Model.FieldSpec> mapFields,
                                          List<Model.FieldSpec> polyFields,
@@ -355,12 +361,12 @@ final class Emitter {
             cb.addStatement("c.skipChild()");
             return;
         }
-        // Group descendant fields by head qname (predicate kept alongside).
-        Map<Model.QKey, List<Map.Entry<xmlfluss.path.Predicate, Model.FieldSpec>>> byHead = new LinkedHashMap<>();
+        // Group descendant fields by head qname (brackets kept alongside).
+        Map<Model.QKey, List<Map.Entry<List<Predicate>, Model.FieldSpec>>> byHead = new LinkedHashMap<>();
         for (Model.FieldSpec f : descendantFields) {
             Model.PathSeg.Element head = (Model.PathSeg.Element) ((Model.Source.Child) f.source()).segments().get(0);
             byHead.computeIfAbsent(new Model.QKey(head.ns(), head.name()), k -> new ArrayList<>())
-                    .add(new java.util.AbstractMap.SimpleEntry<>(head.foldedPredicate(), f));
+                    .add(new java.util.AbstractMap.SimpleEntry<>(head.brackets(), f));
         }
 
         boolean first = true;
@@ -371,7 +377,7 @@ final class Emitter {
             String prefix = first ? "if " : "else if ";
             first = false;
             cb.add("$L($S.equals($L) && $L) {\n", prefix, key.local(), lnVar, nsMatchExprVar(key.ns(), nsVar)).indent();
-            emitPredicateBranches(cb, entry.getValue(), registry, converterRefs);
+            emitPredicateBranches(cb, key, entry.getValue(), slots, registry, converterRefs);
             cb.unindent().add("}\n");
         }
         // Map entry arms.
@@ -408,7 +414,7 @@ final class Emitter {
             String prefix = first ? "if " : "else if ";
             first = false;
             cb.add("$L($S.equals($L) && $L) {\n", prefix, head.local(), lnVar, nsMatchExprVar(head.ns(), nsVar)).indent();
-            emitDescendantArm(cb, entry.getValue(), registry, converterRefs, /*terminating=*/false);
+            emitDescendantArm(cb, head, entry.getValue(), registry, converterRefs, /*terminating=*/false);
             cb.unindent().add("}\n");
         }
         // Else: descendant scan or skipChild.
@@ -430,7 +436,7 @@ final class Emitter {
                 dfirst = false;
                 cb.add("$L($S.equals(dln) && $L) {\n", prefix, head.local(),
                         nsMatchExprVar(head.ns(), "dns")).indent();
-                emitDescendantArm(cb, entry.getValue(), registry, converterRefs, /*terminating=*/true);
+                emitDescendantArm(cb, head, entry.getValue(), registry, converterRefs, /*terminating=*/true);
                 cb.unindent().add("}\n");
             }
             cb.add("return false;\n");
@@ -441,14 +447,18 @@ final class Emitter {
 
     /** One arm of the descendant dispatch — head matched, walk tail or read leaf. */
     private void emitDescendantArm(CodeBlock.Builder cb,
-                                   List<Map.Entry<xmlfluss.path.Predicate, Model.FieldSpec>> branches,
+                                   Model.QKey head,
+                                   List<Map.Entry<List<Predicate>, Model.FieldSpec>> branches,
                                    Model.NestedRegistry registry,
                                    Map<String, ConverterRef> converterRefs,
                                    boolean terminating) {
+        // The descendant-axis head segment cannot carry a positional predicate (rejected by
+        // validateChildPredicate), so brackets here are guaranteed Index-free. We can still have
+        // attribute-equality predicates that select among descendant heads.
         List<Model.FieldSpec> unguarded = new ArrayList<>();
-        List<Map.Entry<xmlfluss.path.Predicate, Model.FieldSpec>> guarded = new ArrayList<>();
+        List<Map.Entry<List<Predicate>, Model.FieldSpec>> guarded = new ArrayList<>();
         for (var entry : branches) {
-            if (entry.getKey() == null) unguarded.add(entry.getValue());
+            if (entry.getKey().isEmpty()) unguarded.add(entry.getValue());
             else guarded.add(entry);
         }
         if (guarded.isEmpty()) {
@@ -460,7 +470,8 @@ final class Emitter {
         for (var entry : guarded) {
             String prefix = first ? "if " : "else if ";
             first = false;
-            cb.add("$L($L) {\n", prefix, predicateExpr(entry.getKey())).indent();
+            CodeBlock cond = predicateExpr(entry.getKey(), head, java.util.Map.of());
+            cb.add("$L($L) {\n", prefix, cond).indent();
             emitDescendantArmBody(cb, List.of(entry.getValue()), registry, converterRefs);
             if (terminating) cb.add("return true;\n");
             cb.unindent().add("}\n");
@@ -589,8 +600,12 @@ final class Emitter {
             int depth = ++lambdaDepth;
             String lnVar = depth == 1 ? "cln" : "cln" + depth;
             String nsVar = depth == 1 ? "cns" : "cns" + depth;
+            // Counter slots for direct edges under `node` must outlive the per-sibling lambda
+            // — declare them here, BEFORE entering forEachChild, so increments accumulate
+            // across siblings of the same parent.
+            Map<PrefixKey, String> slots = declareCounterSlots(cb, groupChildrenByQKey(node));
             cb.add("$T.forEachChild(c, ($L, $L) -> {\n", CN_ADAPTER, lnVar, nsVar).indent();
-            emitChildrenSwitch(cb, node, registry, converterRefs, lnVar, nsVar);
+            emitChildrenSwitch(cb, node, slots, registry, converterRefs, lnVar, nsVar);
             cb.unindent().add("});\n");
             lambdaDepth--;
         } else {
@@ -600,6 +615,7 @@ final class Emitter {
     }
 
     private void emitChildrenSwitch(CodeBlock.Builder cb, TrieNode node,
+                                    Map<PrefixKey, String> slots,
                                     Model.NestedRegistry registry,
                                     Map<String, ConverterRef> converterRefs,
                                     String lnVar, String nsVar) {
@@ -614,7 +630,7 @@ final class Emitter {
             String prefix = first ? "if " : "else if ";
             first = false;
             cb.add("$L($S.equals($L) && $L) {\n", prefix, k.local(), lnVar, nsMatchExprVar(k.ns(), nsVar)).indent();
-            emitPredicateBranches(cb, entry.getValue(), registry, converterRefs);
+            emitPredicateBranches(cb, k, entry.getValue(), slots, registry, converterRefs);
             cb.unindent().add("}\n");
         }
         cb.add("else {\n").indent();
@@ -686,8 +702,9 @@ final class Emitter {
             }
         }
         if (!root.children.isEmpty() || !descend.isEmpty()) {
+            Map<PrefixKey, String> mapSlots = declareCounterSlots(cb, groupChildrenByQKey(root));
             cb.add("$T.forEachSubrecordChild(c, (mln, mns) -> {\n", CN_ADAPTER).indent();
-            emitTopLevelChildSwitch(cb, root, descend, List.of(), List.of(), registry, converterRefs, "mln", "mns");
+            emitTopLevelChildSwitch(cb, root, mapSlots, descend, List.of(), List.of(), registry, converterRefs, "mln", "mns");
             cb.unindent().add("});\n");
         }
         // Coerce key + value, store.
@@ -846,7 +863,7 @@ final class Emitter {
         int i = 0;
         for (; i < segments.size(); i++) {
             if (!(segments.get(i) instanceof Model.PathSeg.Element e)) break;
-            Model.EdgeKey edge = new Model.EdgeKey(new Model.QKey(e.ns(), e.name()), e.foldedPredicate());
+            Model.EdgeKey edge = new Model.EdgeKey(new Model.QKey(e.ns(), e.name()), e.brackets());
             node = node.children.computeIfAbsent(edge, k -> new TrieNode());
         }
         if (i == segments.size()) {
@@ -857,15 +874,108 @@ final class Emitter {
         }
     }
 
-    /** Group children of one trie node by base QKey, collecting predicate variants. */
-    private LinkedHashMap<Model.QKey, List<Map.Entry<xmlfluss.path.Predicate, TrieNode>>> groupChildrenByQKey(TrieNode node) {
-        LinkedHashMap<Model.QKey, List<Map.Entry<xmlfluss.path.Predicate, TrieNode>>> grouped = new LinkedHashMap<>();
+    /** Group children of one trie node by base QKey, collecting bracket-list variants in declared order. */
+    private LinkedHashMap<Model.QKey, List<Map.Entry<List<Predicate>, TrieNode>>> groupChildrenByQKey(TrieNode node) {
+        LinkedHashMap<Model.QKey, List<Map.Entry<List<Predicate>, TrieNode>>> grouped = new LinkedHashMap<>();
         for (var entry : node.children.entrySet()) {
             Model.EdgeKey edge = entry.getKey();
             grouped.computeIfAbsent(edge.qkey(), k -> new ArrayList<>())
-                    .add(new java.util.AbstractMap.SimpleEntry<>(edge.predicate(), entry.getValue()));
+                    .add(new java.util.AbstractMap.SimpleEntry<>(edge.brackets(), entry.getValue()));
         }
         return grouped;
+    }
+
+    /** Slot identity: counter is keyed by (qname, prefix-of-first-Index-bracket). */
+    private record PrefixKey(Model.QKey qkey, List<Predicate> prefix) {}
+
+    private static boolean containsIndex(Predicate p) {
+        if (p instanceof Predicate.Index) return true;
+        if (p instanceof Predicate.AttrEq) return false;
+        if (p instanceof Predicate.And and) return containsIndex(and.getL()) || containsIndex(and.getR());
+        if (p instanceof Predicate.Or or) return containsIndex(or.getL()) || containsIndex(or.getR());
+        return false;
+    }
+
+    private static boolean bracketsHaveIndex(List<Predicate> brackets) {
+        for (Predicate b : brackets) if (containsIndex(b)) return true;
+        return false;
+    }
+
+    /** Brackets up to (but not including) the first Index-bearing bracket. */
+    private static List<Predicate> prefixOfFirstIndex(List<Predicate> brackets) {
+        List<Predicate> out = new ArrayList<>();
+        for (Predicate b : brackets) {
+            if (containsIndex(b)) break;
+            out.add(b);
+        }
+        return Collections.unmodifiableList(out);
+    }
+
+    /**
+     * Walks {@code p} left-to-right and returns the first Index value encountered. The grammar
+     * permits {@code [2 and @x='y']} which yields {@code And(Index(2), AttrEq(...))} — Index can
+     * appear anywhere.
+     */
+    private static int firstIndexValue(Predicate p) {
+        if (p instanceof Predicate.Index idx) return idx.getN();
+        if (p instanceof Predicate.And and) {
+            return containsIndex(and.getL()) ? firstIndexValue(and.getL()) : firstIndexValue(and.getR());
+        }
+        if (p instanceof Predicate.Or) {
+            throw new IllegalStateException("Index inside Or predicate is not supported (predicate=" + p + ")");
+        }
+        throw new IllegalStateException("firstIndexValue: predicate has no Index (" + p + ")");
+    }
+
+    /**
+     * Returns {@code p} with all Index sub-predicates removed, or {@code null} if removal leaves
+     * nothing. Only defined for And-shaped composites — Or with embedded Index is rejected.
+     */
+    private static Predicate stripIndex(Predicate p) {
+        if (p instanceof Predicate.Index) return null;
+        if (p instanceof Predicate.AttrEq) return p;
+        if (p instanceof Predicate.And and) {
+            Predicate l = stripIndex(and.getL());
+            Predicate r = stripIndex(and.getR());
+            if (l == null) return r;
+            if (r == null) return l;
+            return new Predicate.And(l, r);
+        }
+        if (p instanceof Predicate.Or) {
+            throw new IllegalStateException("Index inside Or predicate is not supported (predicate=" + p + ")");
+        }
+        return p;
+    }
+
+    private static String slotName(Model.QKey qkey, int ordinal) {
+        String safe = qkey.local().replaceAll("[^A-Za-z0-9_]", "_");
+        return safe + "_" + ordinal;
+    }
+
+    /**
+     * Emits {@code int[] __cnt_<slot> = new int[]{0};} declarations for each {@code (qkey, prefix)}
+     * slot needed by direct edges in {@code grouped} that contain a positional predicate. Returns
+     * a map from {@link PrefixKey} to the slot variable name so call sites can reference
+     * {@code __cnt_<name>}/{@code __pre_<name>}/{@code __pos_<name>}.
+     */
+    private Map<PrefixKey, String> declareCounterSlots(
+            CodeBlock.Builder cb,
+            Map<Model.QKey, List<Map.Entry<List<Predicate>, TrieNode>>> grouped) {
+        LinkedHashMap<PrefixKey, String> slots = new LinkedHashMap<>();
+        for (var qe : grouped.entrySet()) {
+            Model.QKey qk = qe.getKey();
+            for (var be : qe.getValue()) {
+                List<Predicate> brackets = be.getKey();
+                if (!bracketsHaveIndex(brackets)) continue;
+                List<Predicate> prefix = prefixOfFirstIndex(brackets);
+                PrefixKey key = new PrefixKey(qk, prefix);
+                if (slots.containsKey(key)) continue;
+                String name = slotName(qk, slots.size());
+                slots.put(key, name);
+                cb.addStatement("final int[] __cnt_$L = new int[]{0}", name);
+            }
+        }
+        return slots;
     }
 
     /**
@@ -879,23 +989,46 @@ final class Emitter {
      *     a single element body can only be consumed once.
      */
     private void emitPredicateBranches(CodeBlock.Builder cb,
-                                       List<Map.Entry<xmlfluss.path.Predicate, TrieNode>> branches,
+                                       Model.QKey qkey,
+                                       List<Map.Entry<List<Predicate>, TrieNode>> branches,
+                                       Map<PrefixKey, String> slots,
                                        Model.NestedRegistry registry,
                                        Map<String, ConverterRef> converterRefs) {
-        if (branches.size() == 1 && branches.get(0).getKey() == null) {
+        // Per-element pre-compute: increment any counters that key on this qname BEFORE the
+        // two-pass dispatch. Each element produces exactly one increment per slot, regardless of
+        // how many attr-only / body branches reference that slot.
+        for (var slotEntry : slots.entrySet()) {
+            PrefixKey key = slotEntry.getKey();
+            if (!key.qkey().equals(qkey)) continue;
+            String name = slotEntry.getValue();
+            if (key.prefix().isEmpty()) {
+                // No prefix guard — unconditionally increment.
+                cb.addStatement("final int __pos_$L = ++__cnt_$L[0]", name, name);
+            } else {
+                Predicate folded = key.prefix().get(0);
+                for (int i = 1; i < key.prefix().size(); i++) {
+                    folded = new Predicate.And(folded, key.prefix().get(i));
+                }
+                CodeBlock preExpr = plainPredicateExpr(folded);
+                cb.addStatement("final boolean __pre_$L = $L", name, preExpr);
+                cb.addStatement("final int __pos_$L = __pre_$L ? ++__cnt_$L[0] : 0", name, name, name);
+            }
+        }
+
+        if (branches.size() == 1 && branches.get(0).getKey().isEmpty()) {
             emitChildBody(cb, branches.get(0).getValue(), registry, converterRefs);
             return;
         }
         for (var entry : branches) {
             TrieNode child = entry.getValue();
             if (child.attrEntries.isEmpty()) continue;
-            xmlfluss.path.Predicate pred = entry.getKey();
-            CodeBlock cond = pred == null ? CodeBlock.of("true") : predicateExpr(pred);
+            List<Predicate> brackets = entry.getKey();
+            CodeBlock cond = predicateExpr(brackets, qkey, slots);
             cb.add("if ($L) {\n", cond).indent();
             emitAttrEntries(cb, child);
             cb.unindent().add("}\n");
         }
-        List<Map.Entry<xmlfluss.path.Predicate, TrieNode>> bodyBranches = new ArrayList<>();
+        List<Map.Entry<List<Predicate>, TrieNode>> bodyBranches = new ArrayList<>();
         for (var entry : branches) {
             if (nodeHasBodyContent(entry.getValue())) bodyBranches.add(entry);
         }
@@ -905,10 +1038,10 @@ final class Emitter {
         }
         boolean first = true;
         for (var entry : bodyBranches) {
-            xmlfluss.path.Predicate pred = entry.getKey();
+            List<Predicate> brackets = entry.getKey();
             String prefix = first ? "if " : "else if ";
             first = false;
-            CodeBlock cond = pred == null ? CodeBlock.of("true") : predicateExpr(pred);
+            CodeBlock cond = predicateExpr(brackets, qkey, slots);
             cb.add("$L($L) {\n", prefix, cond).indent();
             emitChildBodyContent(cb, entry.getValue(), registry, converterRefs);
             cb.unindent().add("}\n");
@@ -922,9 +1055,61 @@ final class Emitter {
         return !node.textEntries.isEmpty() || !node.nestedEntries.isEmpty() || !node.children.isEmpty();
     }
 
-    /** Render a {@link xmlfluss.path.Predicate} as a Java boolean expression over {@code c.childAttr}. */
-    private CodeBlock predicateExpr(xmlfluss.path.Predicate p) {
-        if (p instanceof xmlfluss.path.Predicate.AttrEq ae) {
+    /**
+     * Emit a boolean expression for {@code brackets} in the context of {@code qkey}, optionally
+     * referencing counter slots from {@code slots}. When any bracket contains a positional
+     * {@link Predicate.Index}, the corresponding {@code __pre_<slot>}/{@code __pos_<slot>}
+     * references are emitted; everything before the first Index becomes part of the slot's
+     * prefix expression and everything after is appended as plain expressions.
+     */
+    private CodeBlock predicateExpr(List<Predicate> brackets, Model.QKey qkey, Map<PrefixKey, String> slots) {
+        if (brackets.isEmpty()) return CodeBlock.of("true");
+        if (!bracketsHaveIndex(brackets)) {
+            Predicate folded = brackets.get(0);
+            for (int i = 1; i < brackets.size(); i++) folded = new Predicate.And(folded, brackets.get(i));
+            return plainPredicateExpr(folded);
+        }
+        int firstIdxIndex = -1;
+        for (int i = 0; i < brackets.size(); i++) {
+            if (containsIndex(brackets.get(i))) { firstIdxIndex = i; break; }
+        }
+        if (firstIdxIndex < 0) {
+            throw new IllegalStateException("predicateExpr called with no Index in brackets — bug in bracketsHaveIndex");
+        }
+        List<Predicate> prefix = brackets.subList(0, firstIdxIndex);
+        Predicate firstIdxBracket = brackets.get(firstIdxIndex);
+        List<Predicate> suffix = brackets.subList(firstIdxIndex + 1, brackets.size());
+        int n = firstIndexValue(firstIdxBracket);
+        PrefixKey slotKey = new PrefixKey(qkey, prefixOfFirstIndex(brackets));
+        String slotName = slots.get(slotKey);
+        if (slotName == null) {
+            throw new IllegalStateException("missing counter slot for " + slotKey + " at qkey=" + qkey
+                    + " — bug in counter detection");
+        }
+        List<CodeBlock> parts = new ArrayList<>();
+        // When the prefix is empty there is no __pre_ variable — the counter is always incremented.
+        if (!prefix.isEmpty()) parts.add(CodeBlock.of("__pre_$L", slotName));
+        parts.add(CodeBlock.of("(__pos_$L == $L)", slotName, n));
+        // If the first-index bracket also contains non-Index predicates (e.g. `[2 and @x='y']`),
+        // emit those alongside the position check.
+        Predicate residual = stripIndex(firstIdxBracket);
+        if (residual != null) parts.add(plainPredicateExpr(residual));
+        // Suffix: every bracket after the one that introduced the Index. These are evaluated as
+        // ordinary attribute predicates against the current element — they refine the position
+        // match but do not affect counter incrementing.
+        for (Predicate s : suffix) parts.add(plainPredicateExpr(s));
+        CodeBlock acc = parts.get(0);
+        for (int i = 1; i < parts.size(); i++) acc = CodeBlock.of("($L && $L)", acc, parts.get(i));
+        return acc;
+    }
+
+    /**
+     * Emit a boolean expression for an Index-free predicate. Equivalent to the legacy
+     * {@code predicateExpr} minus the Index arm; descending into And/Or recurses through this same
+     * function. Callers must guarantee {@code p} contains no {@link Predicate.Index}.
+     */
+    private CodeBlock plainPredicateExpr(Predicate p) {
+        if (p instanceof Predicate.AttrEq ae) {
             String ns = ae.getName().getNs();
             CodeBlock nsLit = ns == null ? CodeBlock.of("null") : CodeBlock.of("$S", ns);
             String local = ae.getName().getLocal();
@@ -936,12 +1121,15 @@ final class Emitter {
             }
             return CodeBlock.of("($S.equals(c.childAttr($L, $S)))", value, nsLit, local);
         }
-        if (p instanceof xmlfluss.path.Predicate.And and) {
-            return CodeBlock.of("($L && $L)", predicateExpr(and.getL()), predicateExpr(and.getR()));
+        if (p instanceof Predicate.And and) {
+            return CodeBlock.of("($L && $L)", plainPredicateExpr(and.getL()), plainPredicateExpr(and.getR()));
         }
-        if (p instanceof xmlfluss.path.Predicate.Or or) {
-            return CodeBlock.of("($L || $L)", predicateExpr(or.getL()), predicateExpr(or.getR()));
+        if (p instanceof Predicate.Or or) {
+            return CodeBlock.of("($L || $L)", plainPredicateExpr(or.getL()), plainPredicateExpr(or.getR()));
         }
-        throw new IllegalStateException("Index predicate not supported in @XmlChild; rejected at validation");
+        if (p instanceof Predicate.Index) {
+            throw new IllegalStateException("plainPredicateExpr called on Index — counter logic should have stripped this");
+        }
+        throw new IllegalStateException("unknown predicate: " + p);
     }
 }

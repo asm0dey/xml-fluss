@@ -366,6 +366,41 @@ final class NewFeaturesTest {
         }
     }
 
+    // ---- positional @XmlChild brackets --------------------------------------
+
+    @Test
+    void leafPositionalSelectsSecondSibling() throws Exception {
+        String item = """
+                package sample;
+                import xmlfluss.XmlAttr;
+                import xmlfluss.XmlRecord;
+                @XmlRecord(path = "//item")
+                public record Item(@XmlAttr(name = "id") String id) {}
+                """;
+        String feed = """
+                package sample;
+                import xmlfluss.XmlChild;
+                import xmlfluss.XmlRecord;
+                @XmlRecord(path = "//feed")
+                public record FeedSecondItem(
+                        @XmlChild(path = "item[2]") Item secondItem) {}
+                """;
+        try (var h = AptTestHarness.compile(item, feed)) {
+            String xml = """
+                    <feed>
+                      <item id="1"/>
+                      <item id="2"/>
+                      <item id="3"/>
+                    </feed>
+                    """;
+            try (var s = h.parser("sample.FeedSecondItem").parse(AptTestHarness.xml(xml))) {
+                Object first = s.findFirst().orElseThrow();
+                Object second = reflectGet(first, "secondItem");
+                assertEquals("2", reflectGet(second, "id"));
+            }
+        }
+    }
+
     // ---- helpers -------------------------------------------------------------
 
     private static Object reflectGet(Object o, String name) {

@@ -505,7 +505,12 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
                         "@XmlChild path '$path' for '$fieldName': wildcard namespace '{*}' is not supported"
                     }
                     val brackets = s.brackets
-                    for (b in brackets) validateChildPredicate(b, path, fieldName)
+                    val onDescendantHead = descendant && idx == 0
+                    for (b in brackets) validateChildPredicate(b, path, fieldName, onDescendantHead)
+                    val indexBracketCount = brackets.count { containsIndex(it) }
+                    vRequire(indexBracketCount <= 1) {
+                        "@XmlChild path '$path' for '$fieldName': only one positional predicate is allowed per segment (found multiple in '${s.name.local}'). Express the second positional via @XmlRecord, or restructure your XML."
+                    }
                     out += PathSeg.Element(s.name.ns, s.name.local, brackets)
                 }
                 is PathStep.AttrLeaf -> {
@@ -527,19 +532,29 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         return out
     }
 
-    private fun validateChildPredicate(p: PathPredicate, path: String, fieldName: String) {
+    private fun validateChildPredicate(
+        p: PathPredicate,
+        path: String,
+        fieldName: String,
+        onDescendantHead: Boolean,
+    ) {
         when (p) {
-            is PathPredicate.Index -> vError(
-                "@XmlChild path '$path' for '$fieldName': positional predicate [${p.n}] is not supported inside @XmlChild. " +
-                "Move the positional filter to @XmlRecord (e.g. @XmlRecord(\"//... [${p.n}]\")) or collect siblings into a List<T> field and pick by index in your code."
+            is PathPredicate.Index -> if (onDescendantHead) vError(
+                "@XmlChild path '$path' for '$fieldName': positional predicate [${p.n}] is not supported on the descendant-axis segment ('//<name>[N]'). Move the positional filter to a direct-axis segment (e.g. '//parent/item[${p.n}]') or to @XmlRecord."
             )
             is PathPredicate.AttrEq -> {
                 vRequire(p.name.ns != PathParser.WILDCARD) {
                     "@XmlChild path '$path' for '$fieldName': wildcard namespace in attribute predicate is not supported"
                 }
             }
-            is PathPredicate.And -> { validateChildPredicate(p.l, path, fieldName); validateChildPredicate(p.r, path, fieldName) }
-            is PathPredicate.Or -> { validateChildPredicate(p.l, path, fieldName); validateChildPredicate(p.r, path, fieldName) }
+            is PathPredicate.And -> {
+                validateChildPredicate(p.l, path, fieldName, onDescendantHead)
+                validateChildPredicate(p.r, path, fieldName, onDescendantHead)
+            }
+            is PathPredicate.Or -> {
+                validateChildPredicate(p.l, path, fieldName, onDescendantHead)
+                validateChildPredicate(p.r, path, fieldName, onDescendantHead)
+            }
         }
     }
 
@@ -721,7 +736,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             .map { it as PathSeg.Element }
         val tail = segments.drop(elements.size)
         for (e in elements) {
-            val edge = EdgeKey(QKey(e.ns, e.name), e.predicate)
+            val edge = EdgeKey(QKey(e.ns, e.name), e.brackets)
             node = node.children.getOrPut(edge) { TrieNode() }
         }
         when {
@@ -932,8 +947,11 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
                 val src = f.source as Source.Child
                 insertIntoTrie(root, src.segments, f)
             }
+            // Counter slots must be declared OUTSIDE the per-sibling lambda so that ++__cnt[0]
+            // accumulates across siblings rather than resetting per iteration.
+            val slots = declareCounterSlots(cb, groupChildrenByQKey(root))
             cb.beginControlFlow("c.${forEachFn}·{ ln, ns ->\n")
-            emitTopLevelChildSwitch(cb, root, descendantFields, mapFields, polyFields, registry, convVarFor)
+            emitTopLevelChildSwitch(cb, root, slots, descendantFields, mapFields, polyFields, registry, convVarFor)
             cb.endControlFlow()
             if (textField != null) {
                 val preserve = (textField.source as Source.Text).preserveWhitespace
@@ -1050,8 +1068,9 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             val directF = childSyn.filter { !(it.source as Source.Child).descendant }
             val root = TrieNode()
             for (df in directF) insertIntoTrie(root, (df.source as Source.Child).segments, df)
+            val slots = declareCounterSlots(cb, groupChildrenByQKey(root))
             cb.beginControlFlow("c.forEachSubrecordChild·{ ln, ns ->\n")
-            emitTopLevelChildSwitch(cb, root, descendF, emptyList(), emptyList(), registry, convVarFor)
+            emitTopLevelChildSwitch(cb, root, slots, descendF, emptyList(), emptyList(), registry, convVarFor)
             cb.endControlFlow()
         }
 
@@ -1068,9 +1087,16 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         if (f.nullable) cb.add("__set_${f.name} = true\n")
     }
 
+    /**
+     * Emits the inside-lambda body of a `forEachChild { ln, ns -> ... }` switch over the direct
+     * children of [node]. Counter slot declarations live OUTSIDE the lambda — callers obtain them
+     * via [declareCounterSlots] and pass them in via [slots] so the IntArray persists across
+     * sibling iterations.
+     */
     private fun emitChildrenSwitch(
         cb: CodeBlock.Builder,
         node: TrieNode,
+        slots: Map<PrefixKey, String>,
         registry: NestedTypeRegistry,
     ) {
         if (node.children.isEmpty()) {
@@ -1082,27 +1108,68 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         for ((qk, branches) in grouped) {
             val cond = qnameCond(qk.ns, qk.local)
             cb.beginControlFlow("%L ->", cond)
-            emitPredicateBranches(cb, branches, registry)
+            emitPredicateBranches(cb, qk, branches, slots, registry)
             cb.endControlFlow()
         }
         cb.add(ELSE_SKIP_CHILD)
         cb.endControlFlow()
     }
 
-    private fun groupChildrenByQKey(node: TrieNode): LinkedHashMap<QKey, MutableList<Pair<PathPredicate?, TrieNode>>> {
-        val grouped = LinkedHashMap<QKey, MutableList<Pair<PathPredicate?, TrieNode>>>()
+    private fun groupChildrenByQKey(node: TrieNode): LinkedHashMap<QKey, MutableList<Pair<List<PathPredicate>, TrieNode>>> {
+        val grouped = LinkedHashMap<QKey, MutableList<Pair<List<PathPredicate>, TrieNode>>>()
         for ((edge, child) in node.children) {
-            grouped.getOrPut(edge.qkey) { mutableListOf() }.add(edge.predicate to child)
+            grouped.getOrPut(edge.qkey) { mutableListOf() }.add(edge.brackets to child)
         }
         return grouped
     }
 
+    /**
+     * Emits `IntArray(1)` declarations for each `(qkey, prefix)` slot needed by direct edges in
+     * [grouped] that contain a positional predicate. Returns a map from `PrefixKey` to the slot
+     * variable name so call sites can reference `__cnt_<name>`/`__pre_<name>`/`__pos_<name>`.
+     */
+    private fun declareCounterSlots(
+        cb: CodeBlock.Builder,
+        grouped: Map<QKey, List<Pair<List<PathPredicate>, TrieNode>>>,
+    ): Map<PrefixKey, String> {
+        val slots = LinkedHashMap<PrefixKey, String>()
+        for ((qk, branches) in grouped) {
+            for ((brackets, _) in branches) {
+                if (!bracketsHaveIndex(brackets)) continue
+                val prefix = prefixOfFirstIndex(brackets)
+                val key = PrefixKey(qk, prefix)
+                if (key in slots) continue
+                val name = slotName(qk, slots.size)
+                slots[key] = name
+                cb.add("val __cnt_%L: %T = intArrayOf(0)\n", name, INT_ARRAY)
+            }
+        }
+        return slots
+    }
+
     private fun emitPredicateBranches(
         cb: CodeBlock.Builder,
-        branches: List<Pair<PathPredicate?, TrieNode>>,
+        qkey: QKey,
+        branches: List<Pair<List<PathPredicate>, TrieNode>>,
+        slots: Map<PrefixKey, String>,
         registry: NestedTypeRegistry,
     ) {
-        if (branches.size == 1 && branches[0].first == null) {
+        // Per-element pre-compute: increment any counters that key on this qname BEFORE the
+        // two-pass dispatch. Each element produces exactly one increment per slot, regardless of
+        // how many attr-only / body branches reference that slot.
+        val slotsAtQName: Map<PrefixKey, String> = slots.filterKeys { it.qkey == qkey }
+        for ((key, name) in slotsAtQName) {
+            if (key.prefix.isEmpty()) {
+                // No prefix guard — unconditionally increment.
+                cb.add("val __pos_%L: %T = ++__cnt_%L[0]\n", name, INT, name)
+            } else {
+                val preExpr: CodeBlock = plainPredicateExpr(key.prefix.reduce { a, b -> PathPredicate.And(a, b) })
+                cb.add("val __pre_%L: %T = %L\n", name, BOOLEAN, preExpr)
+                cb.add("val __pos_%L: %T = if (__pre_%L) ++__cnt_%L[0] else 0\n", name, INT, name, name)
+            }
+        }
+
+        if (branches.size == 1 && branches[0].first.isEmpty()) {
             emitChildBody(cb, branches[0].second, registry)
             return
         }
@@ -1114,9 +1181,9 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         //     would race and only the first matching arm would fire.
         //  2. Body-consuming variants (text / nested / descend) dispatch first-match-wins —
         //     a single element body can only be consumed once.
-        for ((pred, child) in branches) {
+        for ((brackets, child) in branches) {
             if (child.attrEntries.isEmpty()) continue
-            val expr = if (pred == null) CodeBlock.of("true") else predicateExpr(pred)
+            val expr = predicateExpr(brackets, qkey, slots)
             cb.beginControlFlow("if (%L)", expr)
             emitAttrEntries(cb, child)
             cb.endControlFlow()
@@ -1127,8 +1194,8 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             return
         }
         cb.beginControlFlow("when")
-        for ((pred, child) in bodyBranches) {
-            val expr = if (pred == null) CodeBlock.of("true") else predicateExpr(pred)
+        for ((brackets, child) in bodyBranches) {
+            val expr = predicateExpr(brackets, qkey, slots)
             cb.beginControlFlow("%L ->", expr)
             emitChildBodyContent(cb, child, registry)
             cb.endControlFlow()
@@ -1190,15 +1257,66 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
                 }
             }
             hasDescend -> {
+                // Counter slots for direct edges under `node` must outlive the per-sibling lambda
+                // — declare them here, BEFORE entering forEachChild, so increments accumulate
+                // across siblings of the same parent.
+                val grouped = groupChildrenByQKey(node)
+                val slots = declareCounterSlots(cb, grouped)
                 cb.beginControlFlow("c.forEachChild·{ ln, ns ->\n")
-                emitChildrenSwitch(cb, node, registry)
+                emitChildrenSwitch(cb, node, slots, registry)
                 cb.endControlFlow()
             }
             else -> cb.add(SKIP_CHILD)
         }
     }
 
-    private fun predicateExpr(p: PathPredicate): CodeBlock = when (p) {
+    /**
+     * Emit a boolean expression for [brackets] in the context of [qkey], optionally referencing
+     * counter slots from [slots]. When any bracket contains a positional [PathPredicate.Index],
+     * the corresponding `__pre_<slot>`/`__pos_<slot>` references are emitted; everything before
+     * the first Index becomes part of the slot's prefix expression and everything after is
+     * appended as plain expressions.
+     */
+    private fun predicateExpr(
+        brackets: List<PathPredicate>,
+        qkey: QKey,
+        slots: Map<PrefixKey, String>,
+    ): CodeBlock {
+        if (brackets.isEmpty()) return CodeBlock.of("true")
+        if (!bracketsHaveIndex(brackets)) {
+            val folded = brackets.reduce { a, b -> PathPredicate.And(a, b) }
+            return plainPredicateExpr(folded)
+        }
+        val firstIdxIndex = brackets.indexOfFirst { containsIndex(it) }
+        require(firstIdxIndex >= 0) { "predicateExpr called with no Index in brackets — bug in bracketsHaveIndex" }
+        val prefix = brackets.subList(0, firstIdxIndex)
+        val firstIdxBracket = brackets[firstIdxIndex]
+        val suffix = brackets.subList(firstIdxIndex + 1, brackets.size)
+        val n = firstIndexValue(firstIdxBracket)
+        val slotKey = PrefixKey(qkey, prefix)
+        val slotName = slots[slotKey]
+            ?: error("missing counter slot for $slotKey at qkey=$qkey — bug in counter detection")
+        val parts = mutableListOf<CodeBlock>()
+        // When the prefix is empty there is no __pre_ variable — the counter is always incremented.
+        if (prefix.isNotEmpty()) parts += CodeBlock.of("__pre_%L", slotName)
+        parts += CodeBlock.of("(__pos_%L == %L)", slotName, n)
+        // If the first-index bracket also contains non-Index predicates (e.g. `[2 and @x='y']`),
+        // emit those alongside the position check.
+        val residual = stripIndex(firstIdxBracket)
+        if (residual != null) parts += plainPredicateExpr(residual)
+        // Suffix: every bracket after the one that introduced the Index. These are evaluated as
+        // ordinary attribute predicates against the current element — they refine the position
+        // match but do not affect counter incrementing.
+        for (s in suffix) parts += plainPredicateExpr(s)
+        return parts.reduce { a, b -> CodeBlock.of("(%L && %L)", a, b) }
+    }
+
+    /**
+     * Emit a boolean expression for an Index-free predicate. Equivalent to the legacy
+     * `predicateExpr` minus the Index arm; descending into And/Or recurses through this same
+     * function. Callers must guarantee [p] contains no [PathPredicate.Index].
+     */
+    private fun plainPredicateExpr(p: PathPredicate): CodeBlock = when (p) {
         is PathPredicate.AttrEq -> {
             val ns = p.name.ns
             val nsLit: CodeBlock = if (ns == null) CodeBlock.of("null") else CodeBlock.of("%S", ns)
@@ -1208,14 +1326,69 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
                 CodeBlock.of("(c.childAttr(%L, %S) == %S)", nsLit, p.name.local, p.value)
             }
         }
-        is PathPredicate.And -> CodeBlock.of("(%L && %L)", predicateExpr(p.l), predicateExpr(p.r))
-        is PathPredicate.Or -> CodeBlock.of("(%L || %L)", predicateExpr(p.l), predicateExpr(p.r))
-        is PathPredicate.Index -> error("Index predicate not supported in @XmlChild; rejected at validation")
+        is PathPredicate.And -> CodeBlock.of("(%L && %L)", plainPredicateExpr(p.l), plainPredicateExpr(p.r))
+        is PathPredicate.Or -> CodeBlock.of("(%L || %L)", plainPredicateExpr(p.l), plainPredicateExpr(p.r))
+        is PathPredicate.Index -> error("plainPredicateExpr called on Index — counter logic should have stripped this")
     }
+
+    private fun containsIndex(p: PathPredicate): Boolean = when (p) {
+        is PathPredicate.Index -> true
+        is PathPredicate.AttrEq -> false
+        is PathPredicate.And -> containsIndex(p.l) || containsIndex(p.r)
+        is PathPredicate.Or -> containsIndex(p.l) || containsIndex(p.r)
+    }
+
+    private fun bracketsHaveIndex(brackets: List<PathPredicate>): Boolean =
+        brackets.any { containsIndex(it) }
+
+    private fun prefixOfFirstIndex(brackets: List<PathPredicate>): List<PathPredicate> =
+        brackets.takeWhile { !containsIndex(it) }
+
+    /**
+     * Walks [p] left-to-right and returns the first Index value encountered. The grammar permits
+     * `[2 and @x='y']` which yields `And(Index(2), AttrEq(...))` — Index can appear anywhere.
+     */
+    private fun firstIndexValue(p: PathPredicate): Int = when (p) {
+        is PathPredicate.Index -> p.n
+        is PathPredicate.And -> if (containsIndex(p.l)) firstIndexValue(p.l) else firstIndexValue(p.r)
+        is PathPredicate.Or -> error("Index inside Or predicate is not supported (predicate=$p)")
+        is PathPredicate.AttrEq -> error("firstIndexValue: predicate has no Index ($p)")
+    }
+
+    /**
+     * Returns [p] with all Index sub-predicates removed, or null if removal leaves nothing. Only
+     * defined for And-shaped composites — Or with an embedded Index is rejected upstream via
+     * [firstIndexValue].
+     */
+    private fun stripIndex(p: PathPredicate): PathPredicate? = when (p) {
+        is PathPredicate.Index -> null
+        is PathPredicate.AttrEq -> p
+        is PathPredicate.And -> {
+            val l = stripIndex(p.l)
+            val r = stripIndex(p.r)
+            when {
+                l == null -> r
+                r == null -> l
+                else -> PathPredicate.And(l, r)
+            }
+        }
+        is PathPredicate.Or -> {
+            // If we ever reach here, containsIndex(p) was true — caught earlier.
+            error("Index inside Or predicate is not supported (predicate=$p)")
+        }
+    }
+
+    private fun slotName(qkey: QKey, ordinal: Int): String {
+        val safe = qkey.local.replace(Regex("[^A-Za-z0-9_]"), "_")
+        return "${safe}_$ordinal"
+    }
+
+    data class PrefixKey(val qkey: QKey, val prefix: List<PathPredicate>)
 
     private fun emitTopLevelChildSwitch(
         cb: CodeBlock.Builder,
         directRoot: TrieNode,
+        slots: Map<PrefixKey, String>,
         descendantFields: List<FieldSpec>,
         mapFields: List<FieldSpec>,
         polyFields: List<FieldSpec>,
@@ -1226,17 +1399,17 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             cb.add(SKIP_CHILD)
             return
         }
-        val byHead = LinkedHashMap<QKey, MutableList<Pair<PathPredicate?, FieldSpec>>>()
+        val byHead = LinkedHashMap<QKey, MutableList<Pair<List<PathPredicate>, FieldSpec>>>()
         for (f in descendantFields) {
             val seg = (f.source as Source.Child).segments[0] as PathSeg.Element
-            byHead.getOrPut(QKey(seg.ns, seg.name)) { mutableListOf() }.add(seg.predicate to f)
+            byHead.getOrPut(QKey(seg.ns, seg.name)) { mutableListOf() }.add(seg.brackets to f)
         }
         val groupedDirect = groupChildrenByQKey(directRoot)
         cb.beginControlFlow("when(ln)")
         for ((qk, branches) in groupedDirect) {
             val cond = qnameCond(qk.ns, qk.local)
             cb.beginControlFlow("%L ->", cond)
-            emitPredicateBranches(cb, branches, registry)
+            emitPredicateBranches(cb, qk, branches, slots, registry)
             cb.endControlFlow()
         }
         for (mf in mapFields) {
@@ -1293,20 +1466,23 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
     private fun emitDescendantArm(
         cb: CodeBlock.Builder,
         head: QKey,
-        branches: List<Pair<PathPredicate?, FieldSpec>>,
+        branches: List<Pair<List<PathPredicate>, FieldSpec>>,
         registry: NestedTypeRegistry,
         terminating: Boolean,
     ) {
-        val unguarded = branches.filter { it.first == null }.map { it.second }
-        val guarded = branches.filter { it.first != null }
+        // The descendant-axis head segment cannot carry a positional predicate (rejected by
+        // validateChildPredicate), so brackets here are guaranteed Index-free. We can still have
+        // attribute-equality predicates that select among descendant heads.
+        val unguarded = branches.filter { it.first.isEmpty() }.map { it.second }
+        val guarded = branches.filter { it.first.isNotEmpty() }
         if (guarded.isEmpty()) {
             emitDescendantArmBody(cb, head, unguarded, registry)
             if (terminating) cb.add("true\n")
             return
         }
         cb.beginControlFlow("when")
-        for ((pred, f) in guarded) {
-            cb.beginControlFlow("%L ->", predicateExpr(pred!!))
+        for ((brackets, f) in guarded) {
+            cb.beginControlFlow("%L ->", predicateExpr(brackets, head, emptyMap()))
             emitDescendantArmBody(cb, head, listOf(f), registry)
             if (terminating) cb.add("true\n")
             cb.endControlFlow()
@@ -1557,9 +1733,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             val ns: String?,
             val name: String,
             val brackets: List<PathPredicate> = emptyList(),
-        ) : PathSeg() {
-            val predicate: PathPredicate? get() = brackets.reduceOrNull { a, b -> PathPredicate.And(a, b) }
-        }
+        ) : PathSeg()
         data class AttrLeaf(val ns: String?, val name: String) : PathSeg()
     }
 
@@ -1611,7 +1785,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
 
     data class QKey(val ns: String?, val local: String)
 
-    data class EdgeKey(val qkey: QKey, val predicate: PathPredicate?)
+    data class EdgeKey(val qkey: QKey, val brackets: List<PathPredicate>)
 
     class TrieNode {
         val children: MutableMap<EdgeKey, TrieNode> = LinkedHashMap()

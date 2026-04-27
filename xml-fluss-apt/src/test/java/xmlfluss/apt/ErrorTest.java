@@ -317,23 +317,34 @@ final class ErrorTest {
     }
 
     @Test
-    void rejectsPositionalPredicateInsideXmlChildWithFixSuggestion() {
-        // `x/i[@k='v'][2]` exercises the user's exact shape: chained attr + positional inside
-        // an @XmlChild path. Validator must reject AND surface a fix hint.
+    void rejectsPositionalPredicateOnDescendantHeadInsideXmlChild() {
+        // After the relaxation in T5, only positional predicates on the descendant-axis
+        // segment itself remain rejected.
         String src = """
                 package sample;
                 import xmlfluss.XmlChild;
                 import xmlfluss.XmlRecord;
                 @XmlRecord(path = "//doc")
-                public record Doc(@XmlChild(path = "x/i[@k='v'][2]") String s) {}
+                public record Doc(@XmlChild(path = "//item[2]") String s) {}
                 """;
         AptTestHarness.CompileResult r = AptTestHarness.procOnly(src);
         assertFalse(r.ok(), "expected compilation failure but processor accepted source:\n" + r.joined());
-        assertTrue(r.hasError("positional predicate [2] is not supported inside @XmlChild"),
-                "expected rejection diagnostic, got:\n" + r.joined());
-        assertTrue(r.hasError("Move the positional filter to @XmlRecord"),
-                "expected fix hint pointing to @XmlRecord, got:\n" + r.joined());
-        assertTrue(r.hasError("collect siblings into a List<T>"),
-                "expected fix hint pointing to List<T> + post-parse filter, got:\n" + r.joined());
+        assertTrue(r.hasError("positional predicate [2] is not supported on the descendant-axis segment"),
+                "expected narrowed rejection diagnostic, got:\n" + r.joined());
+        assertTrue(r.hasError("Move the positional filter to a direct-axis segment"),
+                "expected fix hint pointing to direct-axis segment, got:\n" + r.joined());
+    }
+
+    @Test
+    void rejectsMultipleIndexBracketsOnSameSegment() {
+        // item[2][3] has two Index-bearing brackets on the same segment; only one is allowed.
+        String src = """
+                package sample;
+                import xmlfluss.XmlChild;
+                import xmlfluss.XmlRecord;
+                @XmlRecord(path = "//doc")
+                public record Doc(@XmlChild(path = "item[2][3]") String s) {}
+                """;
+        assertRejected("only one positional predicate is allowed per segment", src);
     }
 }

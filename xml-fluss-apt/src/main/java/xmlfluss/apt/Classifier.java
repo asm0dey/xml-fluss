@@ -653,8 +653,16 @@ final class Classifier {
                             + "': wildcard namespace '{*}' is not supported");
                     throw new ClassifierException("wildcard ns " + fieldName);
                 }
+                boolean onDescHead = descendant && i == 0;
                 List<Predicate> brackets = named.getBrackets();
-                for (Predicate b : brackets) validateChildPredicate(b, path, fieldName, where);
+                for (Predicate b : brackets) validateChildPredicate(b, path, fieldName, where, onDescHead);
+                long indexBracketCount = brackets.stream().filter(Classifier::containsIndex).count();
+                if (indexBracketCount > 1) {
+                    error(where, "@XmlChild path '" + path + "' for '" + fieldName
+                            + "': only one positional predicate is allowed per segment (found multiple in '"
+                            + named.getName().getLocal() + "'). Express the second positional via @XmlRecord, or restructure your XML.");
+                    throw new ClassifierException("multiple index predicates in segment " + fieldName);
+                }
                 segs.add(new Model.PathSeg.Element(named.getName().getNs(), named.getName().getLocal(), brackets));
             }
         }
@@ -669,13 +677,15 @@ final class Classifier {
         return out;
     }
 
-    private void validateChildPredicate(Predicate p, String path, String fieldName, Element where) {
+    private void validateChildPredicate(Predicate p, String path, String fieldName,
+                                         Element where, boolean onDescendantHead) {
         if (p instanceof Predicate.Index idx) {
-            error(where, "@XmlChild path '" + path + "' for '" + fieldName
-                    + "': positional predicate [" + idx.getN() + "] is not supported inside @XmlChild. "
-                    + "Move the positional filter to @XmlRecord (e.g. @XmlRecord(\"//... [" + idx.getN() + "]\")) "
-                    + "or collect siblings into a List<T> field and pick by index in your code.");
-            throw new ClassifierException("index predicate " + fieldName);
+            if (onDescendantHead) {
+                error(where, "@XmlChild path '" + path + "' for '" + fieldName
+                        + "': positional predicate [" + idx.getN() + "] is not supported on the descendant-axis segment ('//<name>[N]'). "
+                        + "Move the positional filter to a direct-axis segment (e.g. '//parent/item[" + idx.getN() + "]') or to @XmlRecord.");
+                throw new ClassifierException("index predicate on descendant head " + fieldName);
+            }
         } else if (p instanceof Predicate.AttrEq ae) {
             if (PathParser.WILDCARD.equals(ae.getName().getNs())) {
                 error(where, "@XmlChild path '" + path + "' for '" + fieldName
@@ -683,12 +693,19 @@ final class Classifier {
                 throw new ClassifierException("wildcard pred ns " + fieldName);
             }
         } else if (p instanceof Predicate.And and) {
-            validateChildPredicate(and.getL(), path, fieldName, where);
-            validateChildPredicate(and.getR(), path, fieldName, where);
+            validateChildPredicate(and.getL(), path, fieldName, where, onDescendantHead);
+            validateChildPredicate(and.getR(), path, fieldName, where, onDescendantHead);
         } else if (p instanceof Predicate.Or or) {
-            validateChildPredicate(or.getL(), path, fieldName, where);
-            validateChildPredicate(or.getR(), path, fieldName, where);
+            validateChildPredicate(or.getL(), path, fieldName, where, onDescendantHead);
+            validateChildPredicate(or.getR(), path, fieldName, where, onDescendantHead);
         }
+    }
+
+    private static boolean containsIndex(Predicate p) {
+        if (p instanceof Predicate.Index) return true;
+        if (p instanceof Predicate.And and) return containsIndex(and.getL()) || containsIndex(and.getR());
+        if (p instanceof Predicate.Or or) return containsIndex(or.getL()) || containsIndex(or.getR());
+        return false;
     }
 
     private void validateChildPaths(TypeElement owner, String ownerFq, List<Model.FieldSpec> fields) {
@@ -808,7 +825,7 @@ final class Classifier {
         int i = 0;
         for (; i < segments.size(); i++) {
             if (!(segments.get(i) instanceof Model.PathSeg.Element e)) break;
-            Model.EdgeKey edge = new Model.EdgeKey(new Model.QKey(e.ns(), e.name()), e.foldedPredicate());
+            Model.EdgeKey edge = new Model.EdgeKey(new Model.QKey(e.ns(), e.name()), e.brackets());
             node = node.children.computeIfAbsent(edge, k -> new TrieNode());
         }
         if (i == segments.size()) {

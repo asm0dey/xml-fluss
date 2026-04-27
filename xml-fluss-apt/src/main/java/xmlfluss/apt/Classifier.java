@@ -588,7 +588,7 @@ final class Classifier {
         // literal segment so existing @XmlMap value="." paths keep compiling.
         if (path.equals(".")) {
             return new Model.Source.Child(
-                    List.of(new Model.PathSeg.Element(nsMap.get(""), ".", null)),
+                    List.of(new Model.PathSeg.Element(nsMap.get(""), ".")),
                     false);
         }
         boolean descendant = path.startsWith("//");

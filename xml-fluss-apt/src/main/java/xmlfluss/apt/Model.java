@@ -20,6 +20,9 @@ final class Model {
     /** A single segment of a multi-segment {@code @XmlChild} path. */
     sealed interface PathSeg permits PathSeg.Element, PathSeg.AttrLeaf {
         record Element(String ns, String name, List<Predicate> brackets) implements PathSeg {
+            public Element {
+                java.util.Objects.requireNonNull(brackets, "brackets");
+            }
             public Element(String ns, String name) { this(ns, name, List.of()); }
             /** Folded view for callers that don't care about bracket order yet. */
             public Predicate foldedPredicate() {

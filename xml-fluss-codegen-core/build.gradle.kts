@@ -1,6 +1,7 @@
 plugins {
     `java-library`
     kotlin("jvm")
+    id("xml-fluss-publish")
 }
 
 java {
@@ -23,3 +24,9 @@ dependencies {
 }
 
 tasks.withType<Test> { useJUnitPlatform() }
+
+xmlFlussPublish {
+    artifactName = "xml-fluss-core"
+    artifactDescription = "Shared codegen model and SPI used by the xml-fluss apt and ksp processors."
+    inceptionYear = "2026"
+}

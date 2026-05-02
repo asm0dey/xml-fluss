@@ -26,15 +26,16 @@ final class Emitter {
     private static final ClassName CN_INPUT_STREAM = ClassName.get(InputStream.class);
     private static final ClassName CN_STREAM = ClassName.get("java.util.stream", "Stream");
     private static final ClassName CN_STREAM_SUPPORT = ClassName.get("java.util.stream", "StreamSupport");
-    private static final ClassName CN_SPLITERATOR = ClassName.get("java.util", "Spliterator");
+    public static final String JAVA_UTIL = "java.util";
+    private static final ClassName CN_SPLITERATOR = ClassName.get(JAVA_UTIL, "Spliterator");
     private static final ClassName CN_ABSTRACT_SPLITERATOR = ClassName.get("java.util.Spliterators", "AbstractSpliterator");
     private static final ClassName CN_CONSUMER = ClassName.get(Consumer.class);
-    private static final ClassName CN_LIST = ClassName.get("java.util", "List");
-    private static final ClassName CN_ARRAY_LIST = ClassName.get("java.util", "ArrayList");
-    private static final ClassName CN_COLLECTIONS = ClassName.get("java.util", "Collections");
-    private static final ClassName CN_MAP = ClassName.get("java.util", "Map");
-    private static final ClassName CN_LINKED_HASH_MAP = ClassName.get("java.util", "LinkedHashMap");
-    private static final ClassName CN_OBJECTS = ClassName.get("java.util", "Objects");
+    private static final ClassName CN_LIST = ClassName.get(JAVA_UTIL, "List");
+    private static final ClassName CN_ARRAY_LIST = ClassName.get(JAVA_UTIL, "ArrayList");
+    private static final ClassName CN_COLLECTIONS = ClassName.get(JAVA_UTIL, "Collections");
+    private static final ClassName CN_MAP = ClassName.get(JAVA_UTIL, "Map");
+    private static final ClassName CN_LINKED_HASH_MAP = ClassName.get(JAVA_UTIL, "LinkedHashMap");
+    private static final ClassName CN_OBJECTS = ClassName.get(JAVA_UTIL, "Objects");
 
     private static final ClassName CN_CURSOR = ClassName.get("xmlfluss.runtime", "XmlReadCursor");
     private static final ClassName CN_PATHS = ClassName.get("xmlfluss.runtime", "Paths");
@@ -892,9 +893,9 @@ final class Emitter {
         return CodeBlock.of("$S", ns);
     }
 
-    private CodeBlock nsMatchExprVar(String ns, String var) {
-        if (ns == null) return CodeBlock.of("($L == null || c.getIgnoreNamespace())", var);
-        return CodeBlock.of("($S.equals($L) || c.getIgnoreNamespace())", ns, var);
+    private CodeBlock nsMatchExprVar(String ns, String variable) {
+        if (ns == null) return CodeBlock.of("($L == null || c.getIgnoreNamespace())", variable);
+        return CodeBlock.of("($S.equals($L) || c.getIgnoreNamespace())", ns, variable);
     }
 
     /**

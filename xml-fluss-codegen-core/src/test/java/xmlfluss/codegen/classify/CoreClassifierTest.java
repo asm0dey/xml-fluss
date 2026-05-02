@@ -1,5 +1,6 @@
 package xmlfluss.codegen.classify;
 
+import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.Test;
 import xmlfluss.codegen.model.*;
 import xmlfluss.codegen.spi.*;
@@ -38,13 +39,12 @@ class CoreClassifierTest {
     }
 
     /** Component with @XmlAttr and explicit name override. */
-    private static FakeComponentSymbol attrComponentWithName(String componentName, String attrName,
-                                                              TypeRef type, boolean nullable) {
+    private static FakeComponentSymbol attrComponentWithName(TypeRef type) {
         FakeAnnotationView ann = FakeAnnotationView.builder()
-                .string(FQ_XML_ATTR, "name", attrName)
+                .string(FQ_XML_ATTR, "name", "foo")
                 .build();
-        return new FakeComponentSymbol(componentName, type, nullable, false, type, null, ann,
-                "handle-" + componentName);
+        return new FakeComponentSymbol("barField", type, false, false, type, null, ann,
+                "handle-" + "barField");
     }
 
     // ------------------------------------------------------------------ simple String @XmlAttr
@@ -120,7 +120,7 @@ class CoreClassifierTest {
     @Test
     void xmlAttr_nameOverride_usesAnnotationName() {
         TypeRef strType = TypeRef.of("java.lang", "String");
-        FakeComponentSymbol c = attrComponentWithName("barField", "foo", strType, false);
+        FakeComponentSymbol c = attrComponentWithName(strType);
         FakeRecordSymbol rec = simpleRecord(c);
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();
         FakeSymbolProvider sp = new FakeSymbolProvider(diag);
@@ -455,20 +455,20 @@ class CoreClassifierTest {
 
     /** Component with @XmlChild and explicit path override. */
     private static FakeComponentSymbol childComponentWithPath(String name, String path,
-                                                               TypeRef type, boolean nullable) {
+                                                               TypeRef type) {
         FakeAnnotationView ann = FakeAnnotationView.builder()
                 .string(FQ_XML_CHILD, "path", path)
                 .build();
-        return new FakeComponentSymbol(name, type, nullable, false, type, null, ann, "handle-" + name);
+        return new FakeComponentSymbol(name, type, false, false, type, null, ann, "handle-" + name);
     }
 
     /** List component with @XmlChild. */
-    private static FakeComponentSymbol childListComponent(String name, TypeRef elemType) {
+    private static FakeComponentSymbol childListComponent(TypeRef elemType) {
         TypeRef listType = TypeRef.parameterized("java.util", "List", List.of(elemType));
         FakeAnnotationView ann = FakeAnnotationView.builder()
                 .annotation(FQ_XML_CHILD)
                 .build();
-        return new FakeComponentSymbol(name, listType, false, true, elemType, null, ann, "handle-" + name);
+        return new FakeComponentSymbol("tags", listType, false, true, elemType, null, ann, "handle-" + "tags");
     }
 
     // ------------------------------------------------------------------ implicit child → String
@@ -506,7 +506,7 @@ class CoreClassifierTest {
     @Test
     void xmlChild_explicitPath_usesAnnotationPath() {
         TypeRef strType = TypeRef.of("java.lang", "String");
-        FakeComponentSymbol c = childComponentWithPath("text", "body", strType, false);
+        FakeComponentSymbol c = childComponentWithPath("text", "body", strType);
         FakeRecordSymbol rec = simpleRecord(c);
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();
         FakeSymbolProvider sp = new FakeSymbolProvider(diag);
@@ -527,7 +527,7 @@ class CoreClassifierTest {
     @Test
     void xmlChild_listOfString_producesListFieldWithAsStringCoerce() {
         TypeRef strType = TypeRef.of("java.lang", "String");
-        FakeComponentSymbol c = childListComponent("tags", strType);
+        FakeComponentSymbol c = childListComponent(strType);
         FakeRecordSymbol rec = simpleRecord(c);
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();
         FakeSymbolProvider sp = new FakeSymbolProvider(diag);
@@ -860,7 +860,7 @@ class CoreClassifierTest {
     @Test
     void xmlChild_multiSegmentDirectPath_producesCorrectSegments() {
         TypeRef strType = TypeRef.of("java.lang", "String");
-        FakeComponentSymbol c = childComponentWithPath("leaf", "wrapper/leaf", strType, false);
+        FakeComponentSymbol c = childComponentWithPath("leaf", "wrapper/leaf", strType);
         FakeRecordSymbol rec = simpleRecord(c);
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();
         FakeSymbolProvider sp = new FakeSymbolProvider(diag);
@@ -886,7 +886,7 @@ class CoreClassifierTest {
     @Test
     void xmlChild_attrLeafPath_producesAttrLeafSegment() {
         TypeRef strType = TypeRef.of("java.lang", "String");
-        FakeComponentSymbol c = childComponentWithPath("id", "parent/@id", strType, false);
+        FakeComponentSymbol c = childComponentWithPath("id", "parent/@id", strType);
         FakeRecordSymbol rec = simpleRecord(c);
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();
         FakeSymbolProvider sp = new FakeSymbolProvider(diag);
@@ -913,7 +913,7 @@ class CoreClassifierTest {
     void xmlChild_attrLeafAtIndex0_reportsDiagnosticAndReturnsNull() {
         // "@id" alone in @XmlChild — original rejects this: use @XmlAttr for record-level attributes
         TypeRef strType = TypeRef.of("java.lang", "String");
-        FakeComponentSymbol c = childComponentWithPath("id", "@id", strType, false);
+        FakeComponentSymbol c = childComponentWithPath("id", "@id", strType);
         FakeRecordSymbol rec = simpleRecord(c);
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();
         FakeSymbolProvider sp = new FakeSymbolProvider(diag);
@@ -931,7 +931,7 @@ class CoreClassifierTest {
     void xmlChild_attrLeafInMiddle_reportsDiagnosticAndReturnsNull() {
         // "a/@x/b" — PathParser itself rejects this: attribute must be the last step
         TypeRef strType = TypeRef.of("java.lang", "String");
-        FakeComponentSymbol c = childComponentWithPath("x", "a/@x/b", strType, false);
+        FakeComponentSymbol c = childComponentWithPath("x", "a/@x/b", strType);
         FakeRecordSymbol rec = simpleRecord(c);
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();
         FakeSymbolProvider sp = new FakeSymbolProvider(diag);
@@ -1540,15 +1540,14 @@ class CoreClassifierTest {
     /**
      * Builds a FakeRecordSymbol representing a sealed polymorphic parent.
      *
-     * @param fq             fully-qualified name of the parent ("com.example.Animal")
-     * @param discriminator  empty string for Tag mode; "@attr-name" for Attr mode
-     * @param subtypes       the sealed subtypes
+     * @param discriminator empty string for Tag mode; "@attr-name" for Attr mode
+     * @param subtypes      the sealed subtypes
      */
-    private static FakeRecordSymbol polyParent(String fq, String discriminator,
+    private static FakeRecordSymbol polyParent(String discriminator,
                                                List<FakeRecordSymbol> subtypes) {
-        int dot = fq.lastIndexOf('.');
-        String pkg = dot >= 0 ? fq.substring(0, dot) : "";
-        String simple = dot >= 0 ? fq.substring(dot + 1) : fq;
+        int dot = "com.example.Animal".lastIndexOf('.');
+        String pkg = "com.example.Animal".substring(0, dot);
+        String simple = "com.example.Animal".substring(dot + 1);
         FakeAnnotationView ann = FakeAnnotationView.builder()
                 .string(FQ_XML_POLYMORPHIC, "discriminator", discriminator)
                 .build();
@@ -1586,10 +1585,10 @@ class CoreClassifierTest {
      * @param path null or empty for {@code @XmlChild} with no path; non-empty for an explicit path.
      */
     private static FakeComponentSymbol polyChildComponent(FakeRecordSymbol parent,
-                                                          String path) {
+                                                          @Nullable String path) {
         TypeRef parentType = TypeRef.of(parent.packageName(), parent.simpleName());
         FakeAnnotationView.Builder b = FakeAnnotationView.builder();
-        if (path.isEmpty()) {
+        if (path == null || path.isEmpty()) {
             b.annotation(FQ_XML_CHILD);
         } else {
             b.string(FQ_XML_CHILD, "path", path);
@@ -1606,7 +1605,7 @@ class CoreClassifierTest {
     void xmlPolymorphic_tagMode_producesPolyChildWithTagDispatch() {
         FakeRecordSymbol cat = subtype("com.example.Cat", "cat");
         FakeRecordSymbol dog = subtype("com.example.Dog", "dog");
-        FakeRecordSymbol animal = polyParent("com.example.Animal", "", List.of(cat, dog));
+        FakeRecordSymbol animal = polyParent("", List.of(cat, dog));
 
         FakeComponentSymbol petField = polyChildComponent(animal, null);
         FakeRecordSymbol owner = simpleRecord(petField);
@@ -1652,7 +1651,7 @@ class CoreClassifierTest {
     void xmlPolymorphic_attrMode_producesPolyChildWithAttrDispatch() {
         FakeRecordSymbol cat = subtype("com.example.Cat", "cat");
         FakeRecordSymbol dog = subtype("com.example.Dog", "dog");
-        FakeRecordSymbol animal = polyParent("com.example.Animal", "@kind", List.of(cat, dog));
+        FakeRecordSymbol animal = polyParent("@kind", List.of(cat, dog));
 
         FakeComponentSymbol petField = polyChildComponent(animal, "entry");
         FakeRecordSymbol owner = simpleRecord(petField);
@@ -1692,7 +1691,7 @@ class CoreClassifierTest {
     @Test
     void xmlPolymorphic_withConverter_reportsDiagnosticAndReturnsNull() {
         FakeRecordSymbol cat = subtype("com.example.Cat", "cat");
-        FakeRecordSymbol animal = polyParent("com.example.Animal", "", List.of(cat));
+        FakeRecordSymbol animal = polyParent("", List.of(cat));
 
         TypeRef parentType = TypeRef.of("com.example", "Animal");
         TypeRef converterType = TypeRef.of("com.example", "AnimalConverter");
@@ -1721,7 +1720,7 @@ class CoreClassifierTest {
     @Test
     void xmlPolymorphic_withFormat_reportsDiagnosticAndReturnsNull() {
         FakeRecordSymbol cat = subtype("com.example.Cat", "cat");
-        FakeRecordSymbol animal = polyParent("com.example.Animal", "", List.of(cat));
+        FakeRecordSymbol animal = polyParent("", List.of(cat));
 
         TypeRef parentType = TypeRef.of("com.example", "Animal");
         FakeAnnotationView ann = FakeAnnotationView.builder()
@@ -1749,7 +1748,7 @@ class CoreClassifierTest {
     @Test
     void xmlPolymorphic_tagMode_withPath_reportsDiagnosticAndReturnsNull() {
         FakeRecordSymbol cat = subtype("com.example.Cat", "cat");
-        FakeRecordSymbol animal = polyParent("com.example.Animal", "", List.of(cat));
+        FakeRecordSymbol animal = polyParent("", List.of(cat));
 
         FakeComponentSymbol c = polyChildComponent(animal, "wrapper");
         FakeRecordSymbol owner = simpleRecord(c);
@@ -1771,7 +1770,7 @@ class CoreClassifierTest {
     @Test
     void xmlPolymorphic_attrMode_withoutPath_reportsDiagnosticAndReturnsNull() {
         FakeRecordSymbol cat = subtype("com.example.Cat", "cat");
-        FakeRecordSymbol animal = polyParent("com.example.Animal", "@kind", List.of(cat));
+        FakeRecordSymbol animal = polyParent("@kind", List.of(cat));
 
         // No path on @XmlChild
         FakeComponentSymbol c = polyChildComponent(animal, null);
@@ -1794,7 +1793,7 @@ class CoreClassifierTest {
     @Test
     void xmlPolymorphic_badDiscriminator_reportsDiagnosticAndReturnsNull() {
         FakeRecordSymbol cat = subtype("com.example.Cat", "cat");
-        FakeRecordSymbol animal = polyParent("com.example.Animal", "kind", List.of(cat));
+        FakeRecordSymbol animal = polyParent("kind", List.of(cat));
 
         FakeComponentSymbol c = polyChildComponent(animal, "entry");
         FakeRecordSymbol owner = simpleRecord(c);
@@ -1818,7 +1817,7 @@ class CoreClassifierTest {
         // Both Cat and Dog declare @XmlSubtype.name = "animal" → duplicate
         FakeRecordSymbol cat = subtype("com.example.Cat", "animal");
         FakeRecordSymbol dog = subtype("com.example.Dog", "animal");
-        FakeRecordSymbol animal = polyParent("com.example.Animal", "", List.of(cat, dog));
+        FakeRecordSymbol animal = polyParent("", List.of(cat, dog));
 
         FakeComponentSymbol c = polyChildComponent(animal, null);
         FakeRecordSymbol owner = simpleRecord(c);
@@ -1845,7 +1844,7 @@ class CoreClassifierTest {
                 "com.example", "Cat", List.of(), Map.of(), null, null, List.of(),
                 FakeAnnotationView.builder().build(), // no annotations at all
                 "handle-Cat");
-        FakeRecordSymbol animal = polyParent("com.example.Animal", "", List.of(cat));
+        FakeRecordSymbol animal = polyParent("", List.of(cat));
 
         FakeComponentSymbol c = polyChildComponent(animal, null);
         FakeRecordSymbol owner = simpleRecord(c);
@@ -1870,8 +1869,8 @@ class CoreClassifierTest {
         // same trie node as non-list text entries, which trips the "multiple non-list text
         // fields" branch of validateTrie.
         TypeRef strType = TypeRef.of("java.lang", "String");
-        FakeComponentSymbol a = childComponentWithPath("a", "x", strType, false);
-        FakeComponentSymbol b = childComponentWithPath("b", "x", strType, false);
+        FakeComponentSymbol a = childComponentWithPath("a", "x", strType);
+        FakeComponentSymbol b = childComponentWithPath("b", "x", strType);
         FakeRecordSymbol rec = simpleRecord(a, b);
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();
         FakeSymbolProvider sp = new FakeSymbolProvider(diag);
@@ -1890,8 +1889,8 @@ class CoreClassifierTest {
         // descendant field's head is "a" too — they collide via the descendant-vs-direct
         // head check.
         TypeRef strType = TypeRef.of("java.lang", "String");
-        FakeComponentSymbol direct = childComponentWithPath("direct", "a/b", strType, false);
-        FakeComponentSymbol desc   = childComponentWithPath("desc",   "//a/b", strType, false);
+        FakeComponentSymbol direct = childComponentWithPath("direct", "a/b", strType);
+        FakeComponentSymbol desc   = childComponentWithPath("desc",   "//a/b", strType);
         FakeRecordSymbol rec = simpleRecord(direct, desc);
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();
         FakeSymbolProvider sp = new FakeSymbolProvider(diag);
@@ -1908,7 +1907,7 @@ class CoreClassifierTest {
     void validateChildPaths_indexPredicateOnDescendantHead_reportsDiagnosticAndReturnsNull() {
         // Positional predicate [N] is not allowed on the descendant-axis head segment.
         TypeRef strType = TypeRef.of("java.lang", "String");
-        FakeComponentSymbol c = childComponentWithPath("first", "//item[1]", strType, false);
+        FakeComponentSymbol c = childComponentWithPath("first", "//item[1]", strType);
         FakeRecordSymbol rec = simpleRecord(c);
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();
         FakeSymbolProvider sp = new FakeSymbolProvider(diag);
@@ -1925,7 +1924,7 @@ class CoreClassifierTest {
     void validateChildPaths_multipleIndexBracketsOnSegment_reportsDiagnosticAndReturnsNull() {
         // Two positional predicates on the same segment should be rejected.
         TypeRef strType = TypeRef.of("java.lang", "String");
-        FakeComponentSymbol c = childComponentWithPath("first", "item[1][2]", strType, false);
+        FakeComponentSymbol c = childComponentWithPath("first", "item[1][2]", strType);
         FakeRecordSymbol rec = simpleRecord(c);
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();
         FakeSymbolProvider sp = new FakeSymbolProvider(diag);
@@ -1940,20 +1939,20 @@ class CoreClassifierTest {
 
     // ================================================================== @XmlConverter validation lift (PR 4)
 
-    private static FakeComponentSymbol attrWithConverter(String name, TypeRef type, boolean nullable,
+    private static FakeComponentSymbol attrWithConverter(String name, TypeRef type,
                                                          TypeRef converterRef) {
         FakeAnnotationView ann = FakeAnnotationView.builder()
                 .annotation(FQ_XML_ATTR)
                 .classRef(FQ_XML_CONVERTER, "cls", converterRef)
                 .build();
-        return new FakeComponentSymbol(name, type, nullable, false, type, null, ann, "handle-" + name);
+        return new FakeComponentSymbol(name, type, false, false, type, null, ann, "handle-" + name);
     }
 
     @Test
     void xmlConverter_validStringConverter_producesCustomCoerce() {
         TypeRef strType = TypeRef.of("java.lang", "String");
         TypeRef converterRef = TypeRef.of("com.example", "MyConverter");
-        FakeComponentSymbol c = attrWithConverter("value", strType, false, converterRef);
+        FakeComponentSymbol c = attrWithConverter("value", strType, converterRef);
         FakeRecordSymbol rec = simpleRecord(c);
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();
         FakeSymbolProvider sp = new FakeSymbolProvider(diag)
@@ -1976,7 +1975,7 @@ class CoreClassifierTest {
         TypeRef intType = TypeRef.ofPrimitive("int");
         TypeRef integerBoxed = TypeRef.of("java.lang", "Integer");
         TypeRef converterRef = TypeRef.of("com.example", "IntC");
-        FakeComponentSymbol c = attrWithConverter("count", intType, false, converterRef);
+        FakeComponentSymbol c = attrWithConverter("count", intType, converterRef);
         FakeRecordSymbol rec = simpleRecord(c);
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();
         FakeSymbolProvider sp = new FakeSymbolProvider(diag)
@@ -1997,7 +1996,7 @@ class CoreClassifierTest {
     void xmlConverter_missingPublicNoArgCtor_reportsDiagnostic() {
         TypeRef strType = TypeRef.of("java.lang", "String");
         TypeRef converterRef = TypeRef.of("com.example", "PrivateC");
-        FakeComponentSymbol c = attrWithConverter("value", strType, false, converterRef);
+        FakeComponentSymbol c = attrWithConverter("value", strType, converterRef);
         FakeRecordSymbol rec = simpleRecord(c);
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();
         FakeSymbolProvider sp = new FakeSymbolProvider(diag)
@@ -2018,7 +2017,7 @@ class CoreClassifierTest {
     void xmlConverter_doesNotImplementConverterInterface_reportsDiagnostic() {
         TypeRef strType = TypeRef.of("java.lang", "String");
         TypeRef converterRef = TypeRef.of("com.example", "NotAConverter");
-        FakeComponentSymbol c = attrWithConverter("value", strType, false, converterRef);
+        FakeComponentSymbol c = attrWithConverter("value", strType, converterRef);
         FakeRecordSymbol rec = simpleRecord(c);
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();
         FakeSymbolProvider sp = new FakeSymbolProvider(diag)
@@ -2039,7 +2038,7 @@ class CoreClassifierTest {
         TypeRef longType = TypeRef.of("java.lang", "Long");
         TypeRef strType = TypeRef.of("java.lang", "String");
         TypeRef converterRef = TypeRef.of("com.example", "StrC");
-        FakeComponentSymbol c = attrWithConverter("value", longType, false, converterRef);
+        FakeComponentSymbol c = attrWithConverter("value", longType, converterRef);
         FakeRecordSymbol rec = simpleRecord(c);
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();
         FakeSymbolProvider sp = new FakeSymbolProvider(diag)
@@ -2060,7 +2059,7 @@ class CoreClassifierTest {
     void xmlConverter_clsReferencesUnknownType_reportsDiagnostic() {
         TypeRef strType = TypeRef.of("java.lang", "String");
         TypeRef converterRef = TypeRef.of("com.example", "Missing");
-        FakeComponentSymbol c = attrWithConverter("value", strType, false, converterRef);
+        FakeComponentSymbol c = attrWithConverter("value", strType, converterRef);
         FakeRecordSymbol rec = simpleRecord(c);
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();
         FakeSymbolProvider sp = new FakeSymbolProvider(diag);

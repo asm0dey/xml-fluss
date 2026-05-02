@@ -13,79 +13,109 @@ internal fun coerceField(f: CoreFieldSpec, convVarFor: Map<String, String>): Cod
 
     val nullable = fieldNullable(f)
 
-    if (f.coerce() is CoreCoerce.MapAggregate) {
-        if (nullable) cb.add("if (!${setN(f.name())}) null else ${mapN(f.name())}\n")
-        else cb.add("${mapN(f.name())}\n")
-        return cb.build()
-    }
-
-    if (f.coerce() is CoreCoerce.Nested) {
-        if (f.isList) {
-            cb.add("${listN(f.name())}\n")
-        } else {
-            if (nullable) {
-                cb.add("if (!${setN(f.name())}) null else ${nestedN(f.name())}\n")
-            } else {
-                cb.add("if (!${setN(f.name())}) %L else ${nestedN(f.name())}!!\n", missingThrow(f.name()))
-            }
+    return when {
+        f.coerce() is CoreCoerce.MapAggregate -> {
+            if (nullable) cb.add("if (!${setN(f.name())}) null else ${mapN(f.name())}\n")
+            else cb.add("${mapN(f.name())}\n")
+            cb.build()
         }
-        return cb.build()
-    }
 
-    if (f.isList) {
-        cb.add("${listN(f.name())}.map { __r -> ")
-        cb.add(coerceRaw(f, CodeBlock.of("__r"), convVarFor))
-        cb.add(" }\n")
-        return cb.build()
-    }
+        f.coerce() is CoreCoerce.Nested -> emitForNested(f, cb, nullable)
+        f.isList -> {
+            cb.add("${listN(f.name())}.map { __r -> ")
+            cb.add(coerceRaw(f, CodeBlock.of("__r"), convVarFor))
+            cb.add(" }\n")
+            cb.build()
+        }
 
-    val rawVar = CodeBlock.of(rawN(f.name()))
-    val miss = missingThrow(f.name())
-    val orMissing = CodeBlock.of("(%L ?: %L)", rawVar, miss)
-    val orEmpty = CodeBlock.of("(%L ?: \"\")", rawVar)
+        else -> {
+            val rawVar = CodeBlock.of(rawN(f.name()))
+            val miss = missingThrow(f.name())
+            val orMissing = CodeBlock.of("(%L ?: %L)", rawVar, miss)
+            val orEmpty = CodeBlock.of("(%L ?: \"\")", rawVar)
 
-    // Source.MapEntry filtered above via Coerce.MapAggregate; Source.PolyChild filtered via
-    // Coerce.Nested. Remaining sources: Attr, Text, Child.
-    when (f.source()) {
-        is CoreSource.Attr -> {
-            if (nullable) {
-                // For AsString the if/else collapses to a no-op pass-through (`raw ?: raw`);
-                // emit the raw nullable directly so kotlinc doesn't warn IfThenToSafeAccess.
-                if (f.coerce() is CoreCoerce.AsString) {
-                    cb.add(rawVar)
-                } else {
-                    cb.add("if (%L == null) null else ", rawVar)
+            // Source.MapEntry filtered above via Coerce.MapAggregate; Source.PolyChild filtered via
+            // Coerce.Nested. Remaining sources: Attr, Text, Child.
+            when (f.source()) {
+                is CoreSource.Attr -> {
+                    processAttributeCoercion(nullable, f, cb, rawVar, convVarFor, orMissing)
+                }
+
+                is CoreSource.Text -> {
+                    // __raw_X is declared as non-null String at the recordText/subrecordText call,
+                    // and that call runs unconditionally for any record carrying an @XmlText field.
+                    // No __set_X gate needed: nullable @XmlText still binds whatever the cursor
+                    // produced (empty string for an empty body).
                     cb.add(coerceRaw(f, rawVar, convVarFor))
                 }
-            } else {
-                cb.add(coerceRaw(f, orMissing, convVarFor))
-            }
-        }
 
-        is CoreSource.Text -> {
-            // __raw_X is declared as non-null String at the recordText/subrecordText call,
-            // and that call runs unconditionally for any record carrying an @XmlText field.
-            // No __set_X gate needed: nullable @XmlText still binds whatever the cursor
-            // produced (empty string for an empty body).
+                is CoreSource.Child -> {
+                    processChildCoercion(f, nullable, cb, orEmpty, convVarFor, miss)
+                }
+
+                else -> Unit
+            }
+            cb.add("\n")
+            cb.build()
+        }
+    }
+}
+
+private fun processChildCoercion(
+    f: CoreFieldSpec,
+    nullable: Boolean,
+    cb: CodeBlock.Builder,
+    orEmpty: CodeBlock,
+    convVarFor: Map<String, String>,
+    miss: CodeBlock
+) {
+    val effLoc =
+        if (needsChildLoc(f)) CodeBlock.of("(${locN(f.name())} ?: __loc)")
+        else CodeBlock.of("__loc")
+    if (nullable) {
+        cb.add("if (!${setN(f.name())}) null else ")
+        cb.add(coerceRaw(f, orEmpty, convVarFor, effLoc))
+    } else {
+        cb.add("if (!${setN(f.name())}) %L else ", miss)
+        cb.add(coerceRaw(f, orEmpty, convVarFor, effLoc))
+    }
+}
+
+private fun processAttributeCoercion(
+    nullable: Boolean,
+    f: CoreFieldSpec,
+    cb: CodeBlock.Builder,
+    rawVar: CodeBlock,
+    convVarFor: Map<String, String>,
+    orMissing: CodeBlock
+) {
+    if (nullable) {
+        // For AsString the if/else collapses to a no-op pass-through (`raw ?: raw`);
+        // emit the raw nullable directly so kotlinc doesn't warn IfThenToSafeAccess.
+        if (f.coerce() is CoreCoerce.AsString) {
+            cb.add(rawVar)
+        } else {
+            cb.add("if (%L == null) null else ", rawVar)
             cb.add(coerceRaw(f, rawVar, convVarFor))
         }
-
-        is CoreSource.Child -> {
-            val effLoc =
-                if (needsChildLoc(f)) CodeBlock.of("(${locN(f.name())} ?: __loc)")
-                else CodeBlock.of("__loc")
-            if (nullable) {
-                cb.add("if (!${setN(f.name())}) null else ")
-                cb.add(coerceRaw(f, orEmpty, convVarFor, effLoc))
-            } else {
-                cb.add("if (!${setN(f.name())}) %L else ", miss)
-                cb.add(coerceRaw(f, orEmpty, convVarFor, effLoc))
-            }
-        }
-
-        else -> Unit
+    } else {
+        cb.add(coerceRaw(f, orMissing, convVarFor))
     }
-    cb.add("\n")
+}
+
+private fun emitForNested(
+    f: CoreFieldSpec,
+    cb: CodeBlock.Builder,
+    nullable: Boolean
+): CodeBlock {
+    if (f.isList) {
+        cb.add("${listN(f.name())}\n")
+    } else if (nullable) {
+        cb.add("if (!${setN(f.name())}) null else ${nestedN(f.name())}\n")
+    } else {
+        cb.add("if (!${setN(f.name())}) %L else ${nestedN(f.name())}!!\n", missingThrow(f.name()))
+    }
+
     return cb.build()
 }
 
@@ -114,6 +144,7 @@ private fun coerceRaw(
         is CoreCoerce.Decimal -> CodeBlock.of(
             "%M(%L, %L, %S, %L)", COERCE_BIG_DECIMAL, nl, raw, coerce.pattern() ?: "", lcExpr,
         )
+
         is CoreCoerce.Custom -> {
             // registerConverter pre-populates convVarFor for every Coerce.Custom field; lookup
             // is total here.

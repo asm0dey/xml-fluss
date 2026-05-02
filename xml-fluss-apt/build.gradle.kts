@@ -11,6 +11,7 @@ java {
 
 dependencies {
     api(project(":xml-fluss-runtime"))
+    api(project(":xml-fluss-codegen-core"))
     implementation("com.palantir.javapoet:javapoet:0.14.0")
 
     testImplementation(platform("org.junit:junit-bom:6.0.3"))

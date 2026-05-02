@@ -42,6 +42,19 @@ You remain responsible for every line you submit, regardless of how it was produ
 - Keep PRs focused. Large, mixed-scope PRs will be asked to split.
 - User-visible changes must be reflected in `README.md` in the same PR.
 
+## Module layout
+
+xml-fluss is composed of four Gradle modules:
+
+- **`xml-fluss-runtime`** — language-neutral runtime: path AST (`xmlfluss.path.*`), coercions, cursor primitives the generated parsers call into. Kotlin. Published.
+- **`xml-fluss-codegen-core`** — shared code-generation core. Holds the neutral data model (`xmlfluss.codegen.model.*`), the `SymbolProvider` SPI (`xmlfluss.codegen.spi.*`), the classifier (`xmlfluss.codegen.classify.*`), and the dispatch-plan builder (`xmlfluss.codegen.plan.*`). Java 17. Internal — not published. Depends only on `xml-fluss-runtime`; no JavaPoet, KotlinPoet, KSP, or `javax.lang.model`.
+- **`xml-fluss-apt`** — Java APT processor. Implements the SymbolProvider SPI over `javax.lang.model.*`, runs core's classifier and dispatch-plan builder, emits parsers via JavaPoet. The single TypeRef↔JavaPoet bridge is `xmlfluss.apt.TypeRefs` (TypeRef→TypeName, called at emit) plus `xmlfluss.apt.spi.AptModelToCore` (TypeName→TypeRef, called by the SPI views).
+- **`xml-fluss-ksp`** — KSP processor. Same shape as APT, over `com.google.devtools.ksp.symbol.*` and KotlinPoet. Bridges live at `xmlfluss.ksp.TypeRefs` and `xmlfluss.ksp.spi.KspModelToCore`.
+
+Adding an annotation: edit the runtime annotation, extend `AnnotationView` in `xml-fluss-codegen-core/src/main/java/xmlfluss/codegen/spi/AnnotationView.java`, implement the new accessor in both `AptAnnotationView` and `KspAnnotationView`, and teach the classifier to consume it. The compiler enforces parity in both SPI implementations.
+
+Adding an emit feature: if the routing is annotation-driven, extend the core classifier and `DispatchPlan`; both emitters walk the same plan. If the change is purely lexical (formatting, comments, attribute order), edit each emitter locally — those stay separate by design.
+
 ## Tests
 
 - New functionality requires new tests.

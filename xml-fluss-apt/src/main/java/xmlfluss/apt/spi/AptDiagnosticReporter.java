@@ -17,6 +17,11 @@ public final class AptDiagnosticReporter implements DiagnosticReporter {
     private final Messager messager;
     private boolean errored;
 
+    /**
+     * Routes diagnostics through the supplied APT {@link Messager}.
+     *
+     * @param messager APT messager used to print errors and warnings
+     */
     public AptDiagnosticReporter(Messager messager) {
         this.messager = messager;
     }

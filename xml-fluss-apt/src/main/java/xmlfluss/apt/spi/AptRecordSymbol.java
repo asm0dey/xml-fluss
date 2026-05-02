@@ -30,6 +30,13 @@ public final class AptRecordSymbol implements RecordSymbol {
     private final Types typeUtils;
     private final AptAnnotationView annotations;
 
+    /**
+     * Wraps a record (or sealed parent) {@link TypeElement} as a {@link RecordSymbol}.
+     *
+     * @param element       type element to expose
+     * @param elementUtils  utilities for reading annotation default values
+     * @param typeUtils     utilities used when materialising components
+     */
     public AptRecordSymbol(TypeElement element, Elements elementUtils, Types typeUtils) {
         this.element = element;
         this.elementUtils = elementUtils;

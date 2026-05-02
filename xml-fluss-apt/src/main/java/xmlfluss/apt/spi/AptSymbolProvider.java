@@ -14,6 +14,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+/** APT-side {@link SymbolProvider} that resolves records and types from a {@link ProcessingEnvironment}. */
 public final class AptSymbolProvider implements SymbolProvider {
 
     private static final String FQ_XML_NS = "xmlfluss.XmlNs";
@@ -23,6 +24,11 @@ public final class AptSymbolProvider implements SymbolProvider {
     private final Types typeUtils;
     private final DiagnosticReporter diagnostics;
 
+    /**
+     * Captures element/type utilities and the diagnostic messager from {@code env}.
+     *
+     * @param env active APT processing environment
+     */
     public AptSymbolProvider(ProcessingEnvironment env) {
         this.elementUtils = env.getElementUtils();
         this.typeUtils = env.getTypeUtils();

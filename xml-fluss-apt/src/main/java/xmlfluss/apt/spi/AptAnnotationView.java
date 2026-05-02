@@ -17,6 +17,12 @@ public final class AptAnnotationView implements AnnotationView {
     private final Element element;
     private final Elements elementUtils;
 
+    /**
+     * Wraps {@code element}'s annotation mirrors as an {@link AnnotationView}.
+     *
+     * @param element       element whose annotations are exposed
+     * @param elementUtils  utilities for resolving annotation default values
+     */
     public AptAnnotationView(Element element, Elements elementUtils) {
         this.element = element;
         this.elementUtils = elementUtils;

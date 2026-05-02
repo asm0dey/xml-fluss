@@ -23,6 +23,12 @@ public final class AptTypeSymbol implements TypeSymbol {
     private final TypeElement element;
     private final Types types;
 
+    /**
+     * Wraps a {@link TypeElement} as a {@link TypeSymbol}.
+     *
+     * @param element type element to expose
+     * @param types   utilities used for the supertype walk
+     */
     public AptTypeSymbol(TypeElement element, Types types) {
         this.element = element;
         this.types = types;

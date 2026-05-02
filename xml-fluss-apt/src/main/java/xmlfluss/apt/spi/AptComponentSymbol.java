@@ -37,6 +37,14 @@ public final class AptComponentSymbol implements ComponentSymbol {
     private final Types typeUtils;
     private final AptAnnotationView annotations;
 
+    /**
+     * Wraps {@code element} as a {@link ComponentSymbol}, using the supplied utilities for
+     * nullability resolution.
+     *
+     * @param element       record component to expose
+     * @param elementUtils  utilities used by the {@code @NullMarked} scope walk
+     * @param typeUtils     utilities used to inspect declared / type-use annotations
+     */
     public AptComponentSymbol(RecordComponentElement element, Elements elementUtils, Types typeUtils) {
         this.element = element;
         this.elementUtils = elementUtils;

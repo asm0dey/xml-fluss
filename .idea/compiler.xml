@@ -6,6 +6,7 @@
         <outputRelativeToContentRoot value="true" />
         <processorPath useClasspath="false">
           <entry name="$PROJECT_DIR$/xml-fluss-apt/build/libs/xml-fluss-apt-0.1.0-SNAPSHOT.jar" />
+          <entry name="$PROJECT_DIR$/xml-fluss-codegen-core/build/libs/xml-fluss-codegen-core-0.1.0-SNAPSHOT.jar" />
           <entry name="$PROJECT_DIR$/xml-fluss-runtime/build/libs/xml-fluss-runtime-0.1.0-SNAPSHOT.jar" />
           <entry name="$USER_HOME$/.gradle/caches/modules-2/files-2.1/com.palantir.javapoet/javapoet/0.14.0/dcc8c803a41861d7b743a24bcd0b42d2f9b13aed/javapoet-0.14.0.jar" />
           <entry name="$USER_HOME$/.gradle/caches/modules-2/files-2.1/org.jetbrains.kotlinx/kotlinx-coroutines-core-jvm/1.10.2/4a9f78ef49483748e2c129f3d124b8fa249dafbf/kotlinx-coroutines-core-jvm-1.10.2.jar" />

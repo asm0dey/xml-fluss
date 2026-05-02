@@ -3,9 +3,15 @@ import com.vanniktech.maven.publish.JavadocJar
 import com.vanniktech.maven.publish.SourcesJar
 
 plugins {
-    id("org.jetbrains.dokka")
-    id("org.jetbrains.dokka-javadoc")
     id("com.vanniktech.maven.publish")
+}
+
+val useDokka = pluginManager.hasPlugin("org.jetbrains.kotlin.jvm") ||
+    pluginManager.hasPlugin("org.jetbrains.kotlin.multiplatform")
+
+if (useDokka) {
+    pluginManager.apply("org.jetbrains.dokka")
+    pluginManager.apply("org.jetbrains.dokka-javadoc")
 }
 
 abstract class XmlFlussPublishExtension {
@@ -19,7 +25,11 @@ val xmlFlussPublish = extensions.create("xmlFlussPublish", XmlFlussPublishExtens
 mavenPublishing {
     configure(
         JavaLibrary(
-            javadocJar = JavadocJar.Dokka("dokkaGeneratePublicationJavadoc"),
+            javadocJar = if (useDokka) {
+                JavadocJar.Dokka("dokkaGeneratePublicationJavadoc")
+            } else {
+                JavadocJar.Javadoc()
+            },
             sourcesJar = SourcesJar.Sources(),
         )
     )

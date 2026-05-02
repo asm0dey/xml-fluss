@@ -44,9 +44,7 @@ final class Emitter {
     private static final ClassName CN_COERCIONS = ClassName.get("xmlfluss.runtime", "Coercions");
     private static final ClassName CN_ADAPTER = ClassName.get("xmlfluss.runtime", "JavaCursorAdapter");
     public static final String SKIP_CHILD = "c.skipChild()";
-    public static final String ELSE = "else {\n";
     public static final String RETURN_TRUE = "return true";
-    public static final String ELSE_IF = "else if ";
 
     private final ProcessingEnvironment env;
 
@@ -286,9 +284,9 @@ final class Emitter {
             // Counter slots must be declared OUTSIDE the per-sibling lambda so that ++__cnt[0]
             // accumulates across siblings rather than resetting per iteration.
             declareSlotsCode(cb, plan.slots());
-            cb.add("$T.$L(c, (ln, ns) -> {\n", CN_ADAPTER, forEachFn).indent();
+            cb.beginControlFlow("$T.$L(c, (ln, ns) ->", CN_ADAPTER, forEachFn);
             emitTopLevelChildSwitch(cb, plan, registry, converterRefs);
-            cb.unindent().add("});\n");
+            cb.endControlFlow(")");
 
             if (textField != null) {
                 boolean preserve = ((Source.Text) textField.source()).preserveWhitespace();
@@ -389,17 +387,22 @@ final class Emitter {
     }
 
     /**
-     * Emits one {@code if/else if ($S.equals(ln) && nsMatch) { body }} arm. Returns the updated
-     * {@code first} flag (always {@code false}) so callers can chain.
+     * Opens one arm of an {@code if/else if (...) { ... }} chain over qname matches. Caller is
+     * responsible for closing the chain with {@link CodeBlock.Builder#endControlFlow()} (or with a
+     * trailing {@code nextControlFlow("else")} + body + {@code endControlFlow()}). Returns the
+     * updated {@code first} flag (always {@code false}) so callers can chain further arms.
      */
     private boolean emitQNameArm(CodeBlock.Builder cb, boolean first,
                                  String local, String ns,
                                  String lnVar, String nsVar,
                                  Runnable body) {
-        String prefix = first ? "if " : ELSE_IF;
-        cb.add("$L($S.equals($L) && $L) {\n", prefix, local, lnVar, nsMatchExprVar(ns, nsVar)).indent();
+        String fmt = "$S.equals($L) && $L";
+        if (first) {
+            cb.beginControlFlow("if (" + fmt + ")", local, lnVar, nsMatchExprVar(ns, nsVar));
+        } else {
+            cb.nextControlFlow("else if (" + fmt + ")", local, lnVar, nsMatchExprVar(ns, nsVar));
+        }
         body.run();
-        cb.unindent().add("}\n");
         return false;
     }
 
@@ -453,13 +456,13 @@ final class Emitter {
             if (first) {
                 cb.addStatement(SKIP_CHILD);
             } else {
-                cb.add(ELSE).indent();
+                cb.nextControlFlow("else");
                 cb.addStatement(SKIP_CHILD);
-                cb.unindent().add("}\n");
+                cb.endControlFlow();
             }
         } else {
-            cb.add(ELSE).indent();
-            cb.add("$T.forEachDescendantInChild(c, (dln, dns) -> {\n", CN_ADAPTER).indent();
+            cb.nextControlFlow("else");
+            cb.beginControlFlow("$T.forEachDescendantInChild(c, (dln, dns) ->", CN_ADAPTER);
             boolean dfirst = true;
             for (var entry : in.byHead.entrySet()) {
                 QKey head = entry.getKey();
@@ -467,9 +470,10 @@ final class Emitter {
                 dfirst = emitQNameArm(cb, dfirst, head.local(), head.ns(), "dln", "dns",
                         () -> emitDescendantArm(cb, head, branches, in.tailTries, registry, converterRefs, /*terminating=*/true));
             }
-            cb.add("return false;\n");
-            cb.unindent().add("});\n");
-            cb.unindent().add("}\n");
+            cb.endControlFlow();
+            cb.addStatement("return false");
+            cb.endControlFlow(")");
+            cb.endControlFlow();
         }
     }
 
@@ -501,22 +505,19 @@ final class Emitter {
         }
         boolean first = true;
         for (DescendantBranch entry : guarded) {
-            String prefix = first ? "if " : ELSE_IF;
-            first = false;
             CodeBlock cond = predicateExpr(entry.brackets(), head, new SlotTable());
-            cb.add("$L($L) {\n", prefix, cond).indent();
+            if (first) cb.beginControlFlow("if ($L)", cond);
+            else cb.nextControlFlow("else if ($L)", cond);
+            first = false;
             emitDescendantArmBody(cb, head, List.of(entry.field()), tail, registry, converterRefs);
             if (terminating) cb.addStatement(RETURN_TRUE);
-            cb.unindent().add("}\n");
         }
         if (!unguarded.isEmpty()) {
-            cb.add(ELSE).indent();
+            cb.nextControlFlow("else");
             emitDescendantArmBody(cb, head, unguarded, tail, registry, converterRefs);
             if (terminating) cb.addStatement(RETURN_TRUE);
-            cb.unindent().add("}\n");
-        } else if (terminating) {
-            // No matching predicate variant: fall through, do not consume.
         }
+        cb.endControlFlow();
     }
 
     private void emitDescendantArmBody(CodeBlock.Builder cb,
@@ -648,9 +649,9 @@ final class Emitter {
             // across siblings of the same parent.
             SlotTable slots = node.allocateSlots();
             declareSlotsCode(cb, slots);
-            cb.add("$T.forEachChild(c, ($L, $L) -> {\n", CN_ADAPTER, lnVar, nsVar).indent();
+            cb.beginControlFlow("$T.forEachChild(c, ($L, $L) ->", CN_ADAPTER, lnVar, nsVar);
             emitChildrenSwitch(cb, node, slots, registry, converterRefs, lnVar, nsVar);
-            cb.unindent().add("});\n");
+            cb.endControlFlow(")");
             lambdaDepth--;
         } else {
             // node has only attrs, no element drains needed; cursor already positioned at the element.
@@ -669,9 +670,9 @@ final class Emitter {
         }
         emitGroupedChildArms(cb, node.groupChildrenByQKey(), true,
                 slots, registry, converterRefs, lnVar, nsVar);
-        cb.add(ELSE).indent();
+        cb.nextControlFlow("else");
         cb.addStatement(SKIP_CHILD);
-        cb.unindent().add("}\n");
+        cb.endControlFlow();
     }
 
     private void emitPolyAssign(CodeBlock.Builder cb, FieldSpec f, String subtypeFq,
@@ -691,15 +692,17 @@ final class Emitter {
                 ClassName.get(String.class), f.name(), nsLiteral(d.attrNs()), d.attrLocal());
         boolean first = true;
         for (AttrVariant v : d.variants()) {
-            String prefix = first ? "if " : ELSE_IF;
+            if (first) {
+                cb.beginControlFlow("if ($T.equals(__disc_$L, $S))", CN_OBJECTS, f.name(), v.value());
+            } else {
+                cb.nextControlFlow("else if ($T.equals(__disc_$L, $S))", CN_OBJECTS, f.name(), v.value());
+            }
             first = false;
-            cb.add("$L($T.equals(__disc_$L, $S)) {\n", prefix, CN_OBJECTS, f.name(), v.value()).indent();
             emitPolyAssign(cb, f, v.subtypeFq(), registry);
-            cb.unindent().add("}\n");
         }
-        cb.add(ELSE).indent();
+        cb.nextControlFlow("else");
         cb.addStatement(SKIP_CHILD);
-        cb.unindent().add("}\n");
+        cb.endControlFlow();
     }
 
     /**
@@ -736,9 +739,9 @@ final class Emitter {
         }
         if (!mp.directRoot().isEmpty() || !mp.descendantByHead().isEmpty()) {
             declareSlotsCode(cb, mp.slots());
-            cb.add("$T.forEachSubrecordChild(c, (mln, mns) -> {\n", CN_ADAPTER).indent();
+            cb.beginControlFlow("$T.forEachSubrecordChild(c, (mln, mns) ->", CN_ADAPTER);
             emitMapEntrySwitch(cb, mp, registry, converterRefs);
-            cb.unindent().add("});\n");
+            cb.endControlFlow(")");
         }
         // Coerce key + value, store.
         cb.add(coerceField(keyF, converterRefs));
@@ -905,8 +908,10 @@ final class Emitter {
 
     /**
      * Emits {@code if/else if} arms over a {@code groupChildrenByQKey} map, one per unique
-     * base {@link QKey}. Returns the updated {@code first} flag so callers can chain
-     * additional sibling arms (map entries, polymorphic variants, etc.).
+     * base {@link QKey}, into an open chain. Caller closes the chain via
+     * {@link CodeBlock.Builder#endControlFlow()} (or with a trailing
+     * {@code nextControlFlow("else")} clause). Returns the updated {@code first} flag so callers
+     * can chain additional sibling arms (map entries, polymorphic variants, etc.).
      */
     private boolean emitGroupedChildArms(CodeBlock.Builder cb,
                                          Map<QKey, List<Map.Entry<List<Predicate>, TrieNode>>> grouped,
@@ -917,11 +922,14 @@ final class Emitter {
                                          String lnVar, String nsVar) {
         for (var entry : grouped.entrySet()) {
             QKey key = entry.getKey();
-            String prefix = first ? "if " : ELSE_IF;
+            String fmt = "$S.equals($L) && $L";
+            if (first) {
+                cb.beginControlFlow("if (" + fmt + ")", key.local(), lnVar, nsMatchExprVar(key.ns(), nsVar));
+            } else {
+                cb.nextControlFlow("else if (" + fmt + ")", key.local(), lnVar, nsMatchExprVar(key.ns(), nsVar));
+            }
             first = false;
-            cb.add("$L($S.equals($L) && $L) {\n", prefix, key.local(), lnVar, nsMatchExprVar(key.ns(), nsVar)).indent();
             emitPredicateBranches(cb, key, entry.getValue(), slots, registry, converterRefs);
-            cb.unindent().add("}\n");
         }
         return first;
     }
@@ -972,9 +980,9 @@ final class Emitter {
             if (child.attrEntries().isEmpty()) continue;
             List<Predicate> brackets = entry.getKey();
             CodeBlock cond = predicateExpr(brackets, qkey, slots);
-            cb.add("if ($L) {\n", cond).indent();
+            cb.beginControlFlow("if ($L)", cond);
             emitAttrEntries(cb, child);
-            cb.unindent().add("}\n");
+            cb.endControlFlow();
         }
         List<Map.Entry<List<Predicate>, TrieNode>> bodyBranches = new ArrayList<>();
         for (var entry : branches) {
@@ -987,16 +995,15 @@ final class Emitter {
         boolean first = true;
         for (var entry : bodyBranches) {
             List<Predicate> brackets = entry.getKey();
-            String prefix = first ? "if " : ELSE_IF;
-            first = false;
             CodeBlock cond = predicateExpr(brackets, qkey, slots);
-            cb.add("$L($L) {\n", prefix, cond).indent();
+            if (first) cb.beginControlFlow("if ($L)", cond);
+            else cb.nextControlFlow("else if ($L)", cond);
+            first = false;
             emitChildBodyContent(cb, entry.getValue(), registry, converterRefs);
-            cb.unindent().add("}\n");
         }
-        cb.add(ELSE).indent();
+        cb.nextControlFlow("else");
         cb.addStatement(SKIP_CHILD);
-        cb.unindent().add("}\n");
+        cb.endControlFlow();
     }
 
     /**

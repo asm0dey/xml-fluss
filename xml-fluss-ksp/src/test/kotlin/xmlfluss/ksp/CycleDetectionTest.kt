@@ -38,7 +38,9 @@ class CycleDetectionTest {
         }.compile()
 
         assertEquals(KotlinCompilation.ExitCode.COMPILATION_ERROR, result.exitCode)
-        assertTrue("recursive nested data class" in result.messages)
-        assertTrue("cycle:" in result.messages)
+        // CoreClassifier (single source of truth post-PR4) reports cycles as
+        // "circular nested record reference at '<field>' (cycle involves '<fqn>')".
+        assertTrue("circular nested record reference" in result.messages)
+        assertTrue("cycle involves" in result.messages)
     }
 }

@@ -74,7 +74,7 @@ class XmlDslProcessorErrorTest {
             data class Doc(@XmlChild val shape: Shape)
             """.trimIndent(),
         )
-        assertFailsWith(src, "duplicate @XmlSubtype tags")
+        assertFailsWith(src, "duplicate @XmlSubtype tag")
     }
 
     @Test
@@ -99,7 +99,7 @@ class XmlDslProcessorErrorTest {
             data class Doc(@XmlChild(path = "shape") val shape: Shape)
             """.trimIndent(),
         )
-        assertFailsWith(src, "duplicate @XmlSubtype values")
+        assertFailsWith(src, "duplicate @XmlSubtype attr value")
     }
 
     @Test
@@ -202,7 +202,7 @@ class XmlDslProcessorErrorTest {
             )
             """.trimIndent(),
         )
-        assertFailsWith(src, "multiple @XmlText fields not allowed")
+        assertFailsWith(src, "@XmlText may appear at most once per record")
     }
 
     @Test
@@ -218,7 +218,7 @@ class XmlDslProcessorErrorTest {
             data class Doc(@XmlText val xs: List<String>)
             """.trimIndent(),
         )
-        assertFailsWith(src, "@XmlText on List unsupported")
+        assertFailsWith(src, "@XmlText is not supported on List")
     }
 
     @Test
@@ -253,7 +253,7 @@ class XmlDslProcessorErrorTest {
             )
             """.trimIndent(),
         )
-        assertFailsWith(src, "nested Map<,> not supported")
+        assertFailsWith(src, "nested Map not supported")
     }
 
     @Test
@@ -282,27 +282,16 @@ class XmlDslProcessorErrorTest {
             )
             """.trimIndent(),
         )
-        assertFailsWith(src, "both @XmlFormat and @XmlConverter")
+        assertFailsWith(src, "@XmlFormat and @XmlConverter are mutually exclusive")
     }
 
-    @Test
-    fun fieldWithoutBindingAnnotationRejected() {
-        val src = SourceFile.kotlin(
-            "NoBinding.kt",
-            """
-            package sample
-            import xmlfluss.XmlChild
-            import xmlfluss.XmlRecord
-
-            @XmlRecord(path = "//doc")
-            data class Doc(
-                @XmlChild(path = "x") val x: String,
-                val y: String,
-            )
-            """.trimIndent(),
-        )
-        assertFailsWith(src, "has no @XmlAttr/@XmlChild/@XmlText/@XmlMap")
-    }
+    // PR 4 Task 8: CoreClassifier (single source of truth) treats unannotated record
+    // components as implicit @XmlChild with the field name as the path, matching APT's
+    // behaviour for `record Doc(String body) {}`. The legacy KSP-strict "no binding"
+    // diagnostic is gone; users that want explicit binding can still annotate. This
+    // test pinned the old strict semantics and is intentionally removed — the positive
+    // path is exercised through xml-fluss-test integration suites where unannotated
+    // fields parse correctly.
 
     @Test
     fun trieMixesTextAndNestedAtSameElement() {
@@ -493,7 +482,7 @@ class XmlDslProcessorErrorTest {
             data class Doc(@XmlAttr @XmlChild(path = "x") val v: String)
             """.trimIndent(),
         )
-        assertFailsWith(src, "multiple xml bindings")
+        assertFailsWith(src, "@XmlAttr / @XmlChild / @XmlText / @XmlMap are mutually exclusive")
     }
 
     @Test
@@ -527,7 +516,7 @@ class XmlDslProcessorErrorTest {
             data class Doc(@XmlChild(path = "v") val v: NotData)
             """.trimIndent(),
         )
-        assertFailsWith(src, "Unsupported type")
+        assertFailsWith(src, "Unsupported field type")
     }
 
     @Test
@@ -554,7 +543,7 @@ class XmlDslProcessorErrorTest {
             )
             """.trimIndent(),
         )
-        assertFailsWith(src, "@XmlFormat / @XmlConverter not supported on polymorphic field")
+        assertFailsWith(src, "not supported on polymorphic field")
     }
 
     @Test
@@ -573,7 +562,7 @@ class XmlDslProcessorErrorTest {
             data class Doc(@XmlAttr(name = "x") val x: Inner)
             """.trimIndent(),
         )
-        assertFailsWith(src, "Nested data-class field 'x' must use @XmlChild")
+        assertFailsWith(src, "@XmlAttr requires a scalar type on 'x'")
     }
 
     @Test
@@ -615,7 +604,7 @@ class XmlDslProcessorErrorTest {
             )
             """.trimIndent(),
         )
-        assertFailsWith(src, "nested data-class type requires an element path")
+        assertFailsWith(src, "nested record requires an element path, not '@attr'")
     }
 
     @Test
@@ -658,7 +647,7 @@ class XmlDslProcessorErrorTest {
             data class Doc(@XmlChild(path = "inner") val inner: Inner)
             """.trimIndent(),
         )
-        assertFailsWith(src, "multiple @XmlText fields not allowed")
+        assertFailsWith(src, "@XmlText may appear at most once per record")
     }
 
     @Test
@@ -710,7 +699,7 @@ class XmlDslProcessorErrorTest {
             data class Doc(@XmlChild val s: Shape)
             """.trimIndent(),
         )
-        assertFailsWith(src, "has no subclasses")
+        assertFailsWith(src, "has no permitted subclasses")
     }
 
     @Test
@@ -733,7 +722,9 @@ class XmlDslProcessorErrorTest {
             data class Doc(@XmlChild val s: Shape)
             """.trimIndent(),
         )
-        assertFailsWith(src, "must be a data class")
+        // KspRecordSymbol.sealedSubtypes() filters out non-data-class subclasses, so
+        // CoreClassifier sees an empty subtype list and reports the parity diagnostic.
+        assertFailsWith(src, "has no permitted subclasses")
     }
 
     @Test

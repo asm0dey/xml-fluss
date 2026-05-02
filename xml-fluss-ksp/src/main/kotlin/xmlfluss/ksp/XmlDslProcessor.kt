@@ -1,29 +1,30 @@
 package xmlfluss.ksp
 
 import com.google.devtools.ksp.processing.*
-import com.google.devtools.ksp.symbol.*
+import com.google.devtools.ksp.symbol.KSAnnotated
+import com.google.devtools.ksp.symbol.KSClassDeclaration
+import com.google.devtools.ksp.symbol.Modifier
 import com.squareup.kotlinpoet.*
 import com.squareup.kotlinpoet.ParameterizedTypeName.Companion.parameterizedBy
 import com.squareup.kotlinpoet.ksp.addOriginatingKSFile
-import com.squareup.kotlinpoet.ksp.toClassName
 import com.squareup.kotlinpoet.ksp.writeTo
+import xmlfluss.codegen.plan.*
 import java.time.LocalDate
 import javax.annotation.processing.Generated
-import xmlfluss.path.PathParser
+import xmlfluss.codegen.model.Coerce as CoreCoerce
+import xmlfluss.codegen.model.FieldSpec as CoreFieldSpec
+import xmlfluss.codegen.model.NestedRegistry as CoreNestedRegistry
+import xmlfluss.codegen.model.PolyDispatch as CorePolyDispatch
+import xmlfluss.codegen.model.QKey as CoreQKey
+import xmlfluss.codegen.model.RecordSpec as CoreRecordSpec
+import xmlfluss.codegen.model.ScalarKind as CoreScalarKind
+import xmlfluss.codegen.model.Source as CoreSource
+import xmlfluss.codegen.model.TypeRef as CoreTypeRef
 import xmlfluss.path.Predicate as PathPredicate
-import xmlfluss.path.QName as PathQName
-import xmlfluss.path.Step as PathStep
 
 private const val XMLFLUSS_RUNTIME = "xmlfluss.runtime"
 private const val SKIP_CHILD = "c.skipChild()\n"
 private const val ELSE_SKIP_CHILD = "else -> $SKIP_CHILD"
-private const val KOTLIN_BOOLEAN = "kotlin.Boolean"
-private const val KOTLIN_DOUBLE = "kotlin.Double"
-private const val KOTLIN_LONG = "kotlin.Long"
-private const val KOTLIN_INT = "kotlin.Int"
-private const val KOTLIN_STRING = "kotlin.String"
-private const val KOTLIN_COLLECTIONS_MAP = "kotlin.collections.Map"
-private const val KOTLIN_COLLECTIONS_LIST = "kotlin.collections.List"
 
 /**
  * KSP processor that turns `@XmlRecord` data classes into streaming parsers.
@@ -55,20 +56,29 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
     private sealed class ProcessorValidationException(message: String) : RuntimeException(message)
     private class ValidationError(message: String) : ProcessorValidationException(message)
 
-    private fun vError(msg: String): Nothing = throw ValidationError(msg)
     private inline fun vRequire(cond: Boolean, msg: () -> String) {
         if (!cond) throw ValidationError(msg())
     }
+
+    /**
+     * Local enum tracking record vs subrecord context so the emitter can pick the right
+     * cursor accessor name (`recordAttr` vs `childAttr`, etc.). No neutral equivalent —
+     * this is a pure emit-side switch.
+     */
+    private enum class Ctx { RECORD, SUBRECORD }
 
     override fun process(resolver: Resolver): List<KSAnnotated> {
         val symbols = resolver.getSymbolsWithAnnotation(XML_RECORD_FQ)
             .filterIsInstance<KSClassDeclaration>()
             .toList()
 
+        val symbolProvider = xmlfluss.ksp.spi.KspSymbolProvider(resolver, logger)
         for (cls in symbols) {
             try {
-                // Build the field model and emit `<Cls>Parser.kt` for this record.
-                generate(cls)
+                // Drive the field model through the shared codegen-core classifier and walk
+                // the neutral RecordSpec directly — TypeRefs handles JavaPoet/KotlinPoet
+                // conversions on demand at emit sites.
+                generate(cls, symbolProvider)
             } catch (e: ProcessorValidationException) {
                 logger.error("xml-fluss-ksp: ${e.message}", cls)
             } catch (e: Throwable) {
@@ -78,757 +88,64 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         return emptyList()
     }
 
-    private fun generate(cls: KSClassDeclaration) {
-        if (Modifier.DATA !in cls.modifiers) {
+    private fun generate(cls: KSClassDeclaration, symbolProvider: xmlfluss.ksp.spi.KspSymbolProvider) {
+        // The SPI's KspSymbolProvider.lookupRecord() owns the kind check (data class OR sealed
+        // parent for @XmlPolymorphic); a non-matching kind returns null after emitting the
+        // diagnostic. Widen the local guard accordingly so sealed-root @XmlRecord cases don't
+        // get rejected here before reaching CoreClassifier.
+        if (Modifier.DATA !in cls.modifiers && Modifier.SEALED !in cls.modifiers) {
             logger.error("@XmlRecord requires data class", cls)
             return
         }
-        // cls came from resolver.getSymbolsWithAnnotation(XML_RECORD_FQ); annotation is guaranteed
-        // present. XmlRecord.path is a non-null String. data classes always carry a primary ctor.
-        // Pull the @XmlRecord annotation mirror and read its `path = "..."` argument.
-        val recordAnn = annotationOf(cls, XML_RECORD_FQ)!!
-        val recordPath = stringArg(recordAnn, "path")!!
-        // Collect every @XmlNs(prefix=, uri=) declared on the class into a prefix→uri map.
-        val nsMap = collectNs(cls)
-        val ctor = cls.primaryConstructor!!
-
-        val registry = NestedTypeRegistry()
-        // Classify each ctor parameter into a FieldSpec (Attr/Child/Text/Map source, target type, converter, etc.).
-        val fields = ctor.parameters.map { classifyParam(cls, it, nsMap, registry) }
-        if (fields.count { it.source is Source.Text } > 1) {
-            vError("${cls.qualifiedName?.asString()}: multiple @XmlText fields not allowed")
-        }
-        // Cross-field path checks: ambiguous overlaps, descendant-leaf vs subpath conflicts, predicate sanity.
-        validateChildPaths(cls, fields)
-
-        // Generate `<Cls>Parser.kt` from the FieldSpec list and write it via the KSP code generator.
-        emitFile(cls, recordPath, nsMap, fields, registry)
-    }
-
-    private fun collectNs(cls: KSClassDeclaration): Map<String, String> =
-        cls.annotations
-            .filter { fq(it) == XML_NS_FQ }
-            .associate {
-                // XmlNs.prefix / .uri are declared as non-null String on the annotation.
-                val prefix = stringArg(it, "prefix")!!
-                val uri = stringArg(it, "uri")!!
-                prefix to uri
-            }
-
-    private fun classifyParam(
-        cls: KSClassDeclaration,
-        p: KSValueParameter,
-        nsMap: Map<String, String>,
-        registry: NestedTypeRegistry,
-    ): FieldSpec {
-        // primary-constructor parameters of a data class are always named.
-        val name = p.name!!.asString()
-        val typeRef = p.type.resolve()
-        val typeFq = typeRef.declaration.qualifiedName?.asString() ?: typeRef.toString()
-        val nullable = typeRef.isMarkedNullable
-
-        val isList = typeFq == KOTLIN_COLLECTIONS_LIST
-        val isMap = typeFq == KOTLIN_COLLECTIONS_MAP
-        if (isList && nullable) vError("List field '$name' must not be nullable; use empty list")
-
-        val elemKsTypeEarly: KSType? = when {
-            isMap -> null
-            isList -> typeRef.arguments.firstOrNull()?.type?.resolve()
-            else -> typeRef
-        }
-        val sealedPolyDecl: KSClassDeclaration? = elemKsTypeEarly
-            ?.let { it.declaration as? KSClassDeclaration }
-            ?.takeIf { Modifier.SEALED in it.modifiers && annotationOf(it, XML_POLYMORPHIC_FQ) != null }
-
-        var source: Source? = null
-        var formatPattern: String? = null
-        var converterFq: String? = null
-        var converterCls: ClassName? = null
-        var mapAnnot: KSAnnotation? = null
-
-        for (a in p.annotations) {
-            when (fq(a)) {
-                XML_ATTR_FQ -> {
-                    vRequire(source == null) { "multiple xml bindings on '$name'" }
-                    val raw = stringArg(a, "name").orEmpty()
-                    val n = raw.ifEmpty { name }
-                    val (ans, alocal) = resolveQName(
-                        n,
-                        nsMap,
-                        defaultNs = null,
-                        path = n,
-                        field = name,
-                        ctx = "@XmlAttr"
-                    )
-                    source = Source.Attr(ans, alocal)
-                }
-
-                XML_CHILD_FQ -> {
-                    vRequire(source == null) { "multiple xml bindings on '$name'" }
-                    val raw = stringArg(a, "path").orEmpty()
-                    if (sealedPolyDecl != null) {
-                        source = buildPolyChild(sealedPolyDecl, raw, name, nsMap, registry)
-                    } else {
-                        val pathStr = raw.ifEmpty { name }
-                        source = parseChildPath(pathStr, name, nsMap)
-                    }
-                }
-
-                XML_TEXT_FQ -> {
-                    vRequire(source == null) { "multiple xml bindings on '$name'" }
-                    if (isList) vError("@XmlText on List unsupported for '$name'")
-                    source = Source.Text(
-                        a.arguments.firstOrNull { it.name?.asString() == "preserveWhitespace" }?.value as? Boolean
-                            ?: false)
-                }
-
-                XML_MAP_FQ -> {
-                    vRequire(source == null && mapAnnot == null) { "multiple xml bindings on '$name'" }
-                    vRequire(isMap) { "@XmlMap requires Map<K, V> type for '$name'" }
-                    mapAnnot = a
-                }
-
-                XML_FORMAT_FQ -> {
-                    // XmlFormat.pattern is a non-null String on the annotation.
-                    formatPattern = stringArg(a, "pattern")!!
-                }
-
-                XML_CONVERTER_FQ -> {
-                    val ksType = a.arguments.firstOrNull { it.name?.asString() == "cls" }?.value as? KSType
-                        ?: vError("@XmlConverter missing cls on '$name'")
-                    val decl = ksType.declaration as? KSClassDeclaration
-                        ?: vError("@XmlConverter cls must be a class on '$name'")
-                    converterFq = decl.qualifiedName?.asString()
-                        ?: vError("@XmlConverter cls qualified name missing on '$name'")
-                    converterCls = decl.toClassName()
-                }
-            }
-        }
-
-        vRequire(formatPattern == null || converterCls == null) {
-            "Field '$name' has both @XmlFormat and @XmlConverter; pick one"
-        }
-
-        if (mapAnnot != null) {
-            vRequire(formatPattern == null && converterCls == null) {
-                "@XmlFormat / @XmlConverter not supported on @XmlMap field '$name'"
-            }
-            return classifyMapParam(name, typeRef, mapAnnot, nsMap, registry)
-        }
-
-        vRequire(!isMap) { "Field '$name' is Map<K, V> but lacks @XmlMap" }
-
-        // elemKsTypeEarly is non-null when isMap is false: scalar/nested types resolve to typeRef,
-        // and List<E> always carries its element type under KSP (raw List doesn't compile).
-        val elemKsType: KSType = elemKsTypeEarly!!
-        val elemFq = elemKsType.declaration.qualifiedName?.asString() ?: elemKsType.toString()
-        val elemNullable = if (isList) elemKsType.isMarkedNullable else nullable
-
-        if (source == null) vError("Field '$name' in ${cls.qualifiedName?.asString()} has no @XmlAttr/@XmlChild/@XmlText/@XmlMap")
-
-        val coerce: Coerce = when {
-            converterCls != null && converterFq != null -> Coerce.Custom(converterCls, converterFq)
-            source is Source.PolyChild -> {
-                vRequire(formatPattern == null && converterCls == null) {
-                    "@XmlFormat / @XmlConverter not supported on polymorphic field '$name'"
-                }
-                Coerce.Nested(elemFq)
-            }
-            elemFq in SCALAR_TEMPORAL_FQS -> coerceForType(elemFq, formatPattern, name)
-            isNestedDataClass(elemKsType) -> {
-                if (source !is Source.Child) {
-                    vError("Nested data-class field '$name' must use @XmlChild")
-                }
-                val elemDecl = elemKsType.declaration as KSClassDeclaration
-                ensureNested(elemDecl, nsMap, registry, terminating = isList || elemNullable)
-                Coerce.Nested(elemFq)
-            }
-
-            else -> vError("Unsupported type '$elemFq' for field '$name'. Use a scalar, supported temporal, BigDecimal, @XmlConverter, or a nested data class.")
-        }
-
-        val typeName = typeNameFor(elemKsType, isList, elemNullable)
-        val elemTypeName = typeNameFor(elemKsType, isList = false, elemNullable)
-        return FieldSpec(
-            name = name,
-            typeName = typeName,
-            nullable = nullable,
-            isList = isList,
-            elemNullable = elemNullable,
-            elemTypeName = elemTypeName,
-            elemTypeFq = elemFq,
-            source = source,
-            coerce = coerce,
-        )
-    }
-
-    private fun classifyMapParam(
-        name: String,
-        typeRef: KSType,
-        mapAnnot: KSAnnotation,
-        nsMap: Map<String, String>,
-        registry: NestedTypeRegistry,
-    ): FieldSpec {
-        // XmlMap.entry / .key / .value are non-null Strings on the annotation.
-        val entry = stringArg(mapAnnot, "entry")!!
-        val keyPath = stringArg(mapAnnot, "key")!!
-        val valPath = stringArg(mapAnnot, "value")!!
-        vRequire(entry.isNotBlank() && '/' !in entry && !entry.startsWith("@")) {
-            "@XmlMap entry '$entry' for '$name' must be a single element name (optional 'prefix:local')"
-        }
-        val (entryNs, entryLocal) = resolveQName(entry, nsMap, defaultNs = nsMap[""], path = entry, field = name)
-
-        // typeRef is Map<K, V> per isMap check upstream; both type args are present.
-        val keyKsType = typeRef.arguments[0].type!!.resolve()
-        val valKsType = typeRef.arguments[1].type!!.resolve()
-
-        val keyField = buildSyntheticMapKvField("mk", keyKsType, keyPath, nsMap, registry, owner = name, kind = "key")
-        val valField = buildSyntheticMapKvField("mv", valKsType, valPath, nsMap, registry, owner = name, kind = "value")
-
-        val nullable = typeRef.isMarkedNullable
-        val mapTypeName = MAP.parameterizedBy(keyField.typeName, valField.typeName).copy(nullable = nullable)
-
-        return FieldSpec(
-            name = name,
-            typeName = mapTypeName,
-            nullable = nullable,
-            isList = false,
-            elemNullable = false,
-            elemTypeName = valField.typeName,
-            elemTypeFq = KOTLIN_COLLECTIONS_MAP,
-            source = Source.MapEntry(entryNs, entryLocal),
-            coerce = Coerce.MapAggregate,
-            mapKeyField = keyField,
-            mapValueField = valField,
-        )
-    }
-
-    private fun buildSyntheticMapKvField(
-        syntheticName: String,
-        type: KSType,
-        pathStr: String,
-        nsMap: Map<String, String>,
-        registry: NestedTypeRegistry,
-        owner: String,
-        kind: String,
-    ): FieldSpec {
-        val typeFq = type.declaration.qualifiedName?.asString() ?: type.toString()
-        vRequire(typeFq != KOTLIN_COLLECTIONS_MAP) { "@XmlMap '$kind' of '$owner': nested Map<,> not supported" }
-        val isList = typeFq == KOTLIN_COLLECTIONS_LIST
-        val nullable = if (isList) false else type.isMarkedNullable
-        // List<E> always exposes a single type argument under KSP.
-        val elemKsType: KSType = if (isList) type.arguments[0].type!!.resolve() else type
-        vRequire(!(isList && elemKsType.isMarkedNullable)) {
-            "@XmlMap '$kind' of '$owner': nullable element inside List<…> not supported"
-        }
-        val elemFq = elemKsType.declaration.qualifiedName?.asString() ?: elemKsType.toString()
-        vRequire(elemFq != KOTLIN_COLLECTIONS_LIST) { "@XmlMap '$kind' of '$owner': List<List<?>> not supported" }
-        vRequire(elemFq != KOTLIN_COLLECTIONS_MAP) { "@XmlMap '$kind' of '$owner': List<Map<?, ?>> / Map element not supported" }
-
-        val source: Source = if (pathStr.startsWith("@")) {
-            val rest = pathStr.substring(1)
-            vRequire(rest.isNotEmpty()) { "@XmlMap '$kind' of '$owner': empty attribute name" }
-            vRequire('/' !in rest) { "@XmlMap '$kind' of '$owner': '@' path must be a single attribute name" }
-            val (ans, alocal) = resolveQName(
-                rest,
-                nsMap,
-                defaultNs = null,
-                path = pathStr,
-                field = syntheticName,
-                ctx = "@XmlMap '$kind'"
-            )
-            Source.Attr(ans, alocal)
-        } else {
-            parseChildPath(pathStr, syntheticName, nsMap)
-        }
-
-        val coerce: Coerce = when {
-            elemFq in SCALAR_TEMPORAL_FQS -> coerceForType(elemFq, null, syntheticName)
-            isNestedDataClass(elemKsType) -> {
-                if (source !is Source.Child) {
-                    vError("@XmlMap '$kind' of '$owner': nested data-class type requires an element path, not '@attr'")
-                }
-                val elemDecl = elemKsType.declaration as KSClassDeclaration
-                ensureNested(elemDecl, nsMap, registry, terminating = isList || nullable)
-                Coerce.Nested(elemFq)
-            }
-
-            else -> vError("@XmlMap '$kind' of '$owner': unsupported type '$elemFq'")
-        }
-
-        val typeName = typeNameFor(elemKsType, isList, elemNullable = nullable)
-        val elemTypeName = typeNameFor(elemKsType, isList = false, elemNullable = nullable)
-        return FieldSpec(
-            name = syntheticName,
-            typeName = typeName,
-            nullable = nullable,
-            isList = isList,
-            elemNullable = nullable,
-            elemTypeName = elemTypeName,
-            elemTypeFq = elemFq,
-            source = source,
-            coerce = coerce,
-        )
-    }
-
-    private fun isNestedDataClass(t: KSType): Boolean {
-        val decl = t.declaration as? KSClassDeclaration ?: return false
-        return Modifier.DATA in decl.modifiers
-    }
-
-    private fun ensureNested(
-        cls: KSClassDeclaration,
-        parentNs: Map<String, String>,
-        registry: NestedTypeRegistry,
-        terminating: Boolean,
-    ): NestedTypeSpec {
-        // ensureNested is only called for declared nested data classes; qualified name is present.
-        val fq = cls.qualifiedName!!.asString()
-        if (!terminating && registry.inProgress.contains(fq)) {
-            val chain = registry.inProgress.toList()
-            val start = chain.indexOf(fq).let { if (it < 0) 0 else it }
-            val cycle = (chain.drop(start) + fq).joinToString(" -> ")
-            vError("recursive nested data class $fq not supported (cycle: $cycle)")
-        }
-        val own = collectNs(cls)
-        for ((p, u) in own) {
-            val pu = parentNs[p] ?: continue
-            if (pu != u) {
-                vError("Nested data class $fq redeclares @XmlNs prefix '$p' as '$u' but enclosing record binds it to '$pu'")
-            }
-        }
-        val ns = parentNs + own
-        registry.byFq[fq]?.let { existing ->
-            if (existing.nsMap != ns) {
-                vError("Nested data class $fq used with conflicting @XmlNs scopes: ${existing.nsMap} vs $ns")
-            }
-            return existing
-        }
-        registry.inProgress.add(fq)
-        try {
-            val typeName = cls.toClassName()
-            val helperName = "__parseNested_${typeName.simpleName}_${registry.byFq.size}"
-            // ensureNested is gated by isNestedDataClass; data classes always have a primary ctor.
-            val ctor = cls.primaryConstructor!!
-            val stub = NestedTypeSpec(cls, typeName, helperName, ns, emptyList())
-            registry.byFq[fq] = stub
-            val fields = ctor.parameters.map { classifyParam(cls, it, ns, registry) }
-            if (fields.count { it.source is Source.Text } > 1) {
-                vError("$fq: multiple @XmlText fields not allowed")
-            }
-            validateChildPaths(cls, fields)
-            val complete = stub.copy(fields = fields)
-            registry.byFq[fq] = complete
-            return complete
-        } finally {
-            registry.inProgress.remove(fq)
-        }
-    }
-
-    private fun coerceForType(typeFq: String, pattern: String?, fieldName: String): Coerce = when (typeFq) {
-        KOTLIN_STRING -> Coerce.AsString
-        KOTLIN_INT -> Coerce.Scalar(ScalarKind.INT)
-        KOTLIN_LONG -> Coerce.Scalar(ScalarKind.LONG)
-        KOTLIN_DOUBLE -> Coerce.Scalar(ScalarKind.DOUBLE)
-        KOTLIN_BOOLEAN -> Coerce.Scalar(ScalarKind.BOOLEAN)
-        "java.time.LocalDate" -> Coerce.Temporal(TemporalKind.LOCAL_DATE, pattern ?: "")
-        "java.time.LocalDateTime" -> Coerce.Temporal(TemporalKind.LOCAL_DATE_TIME, pattern ?: "")
-        "java.time.Instant" -> Coerce.Temporal(TemporalKind.INSTANT, pattern ?: "")
-        "java.math.BigDecimal" -> Coerce.Decimal(pattern ?: "")
-        else -> vError("Unsupported type '$typeFq' for field '$fieldName'.")
-    }
-
-    private fun typeNameFor(t: KSType, isList: Boolean, elemNullable: Boolean): TypeName {
-        val elemFq = t.declaration.qualifiedName?.asString() ?: t.toString()
-        val base: TypeName = when (elemFq) {
-            KOTLIN_STRING -> STRING
-            KOTLIN_INT -> INT
-            KOTLIN_LONG -> LONG
-            KOTLIN_DOUBLE -> DOUBLE
-            KOTLIN_BOOLEAN -> BOOLEAN
-            else -> {
-                val cn = (t.declaration as? KSClassDeclaration)?.toClassName()
-                    ?: ClassName.bestGuess(elemFq)
-                cn
-            }
-        }
-        val elem = base.copy(nullable = elemNullable)
-        return if (isList) LIST.parameterizedBy(elem).copy(nullable = false) else elem
-    }
-
-    private fun parseChildPath(path: String, fieldName: String, nsMap: Map<String, String>): Source.Child {
-        vRequire(path.isNotBlank()) { "@XmlChild path empty for '$fieldName'" }
-        // Self-step shorthand. Historically accepted by the loose splitter; treat as a
-        // single literal segment so existing @XmlMap value="." paths keep compiling.
-        if (path == ".") {
-            return Source.Child(listOf(PathSeg.Element(nsMap[""], ".")), descendant = false)
-        }
-        // Manually classify the leading axis — PathParser auto-prepends a descendant step to every
-        // relative path, which would erase the direct/descendant distinction we need here.
-        val descendant = path.startsWith("//")
-        // Reject absolute non-descendant paths up front (`/foo`); PathParser would parse them but
-        // they have no anchor inside @XmlChild.
-        vRequire(!(path.startsWith("/") && !descendant)) {
-            "@XmlChild path '$path' for '$fieldName': invalid syntax (absolute paths are not supported)"
-        }
-        val defaultNs: String? = nsMap[""]
-        val parser = PathParser(
-            nsResolve = { prefix -> nsMap[prefix] },
-            defaultNs = defaultNs,
-        )
-        val compiled = try {
-            parser.parse(path)
-        } catch (e: xmlfluss.path.PathParseException) {
-            vError("@XmlChild path '$path' for '$fieldName': ${rewriteParseError(e.message ?: "")}")
-        }
-        // PathParser auto-prepends a descendant step for relative paths and emits one for `//`;
-        // strip the leading descendant either way and rely on our own `descendant` flag.
-        val rawSteps = compiled.steps
-        val steps = if (rawSteps.firstOrNull() is PathStep.Descendant) rawSteps.drop(1) else rawSteps
-        vRequire(steps.isNotEmpty()) { "@XmlChild path '$path' for '$fieldName': empty after axis" }
-        if (descendant && steps.firstOrNull() is PathStep.AttrLeaf) {
-            vError("@XmlChild path '$path' for '$fieldName': descendant axis head must be an element")
-        }
-        // Reject internal descendant axes (e.g. wrapper//leaf) — current trie only supports
-        // a single optional descendant prefix at the head.
-        for ((i, s) in steps.withIndex()) {
-            if (s is PathStep.Descendant) {
-                vError("@XmlChild path '$path' for '$fieldName': '//' is only allowed at the head of the path")
-            }
-            if (s is PathStep.AttrLeaf) {
-                vRequire(i == steps.lastIndex) { "@XmlChild path '$path' for '$fieldName': '@' segment must be last" }
-                vRequire(i > 0) { "@XmlChild path '$path' for '$fieldName': use @XmlAttr for record-level attributes" }
-            }
-        }
-        val out = mutableListOf<PathSeg>()
-        for ((idx, s) in steps.withIndex()) {
-            when (s) {
-                is PathStep.Named -> {
-                    vRequire(s.name.local != "*") {
-                        "@XmlChild path '$path' for '$fieldName': wildcard local-name '*' is not supported"
-                    }
-                    vRequire(s.name.ns != PathParser.WILDCARD) {
-                        "@XmlChild path '$path' for '$fieldName': wildcard namespace '{*}' is not supported"
-                    }
-                    val brackets = s.brackets
-                    val onDescendantHead = descendant && idx == 0
-                    for (b in brackets) validateChildPredicate(b, path, fieldName, onDescendantHead)
-                    val indexBracketCount = brackets.count { containsIndex(it) }
-                    vRequire(indexBracketCount <= 1) {
-                        "@XmlChild path '$path' for '$fieldName': only one positional predicate is allowed per segment (found multiple in '${s.name.local}'). Express the second positional via @XmlRecord, or restructure your XML."
-                    }
-                    out += PathSeg.Element(s.name.ns, s.name.local, brackets)
-                }
-                is PathStep.AttrLeaf -> {
-                    out += PathSeg.AttrLeaf(s.name.ns, s.name.local)
-                }
-                PathStep.Descendant -> error("unreachable: descendant filtered above")
-            }
-        }
-        return Source.Child(out, descendant)
-    }
-
-    private fun rewriteParseError(msg: String): String {
-        // Normalize PathParser wording into the historical messages we expose to users.
-        var out = msg
-        out = out.replace("unbound namespace prefix", "unbound NS prefix")
-        if (out.startsWith("expected local-name after ':'") || out.startsWith("expected local-name after '}'")) {
-            out = "malformed (bad qname): $out"
-        }
-        return out
-    }
-
-    private fun validateChildPredicate(
-        p: PathPredicate,
-        path: String,
-        fieldName: String,
-        onDescendantHead: Boolean,
-    ) {
-        when (p) {
-            is PathPredicate.Index -> if (onDescendantHead) vError(
-                "@XmlChild path '$path' for '$fieldName': positional predicate [${p.n}] is not supported on the descendant-axis segment ('//<name>[N]'). Move the positional filter to a direct-axis segment (e.g. '//parent/item[${p.n}]') or to @XmlRecord."
-            )
-            is PathPredicate.AttrEq -> {
-                vRequire(p.name.ns != PathParser.WILDCARD) {
-                    "@XmlChild path '$path' for '$fieldName': wildcard namespace in attribute predicate is not supported"
-                }
-            }
-            is PathPredicate.And -> {
-                validateChildPredicate(p.l, path, fieldName, onDescendantHead)
-                validateChildPredicate(p.r, path, fieldName, onDescendantHead)
-            }
-            is PathPredicate.Or -> {
-                vRequire(!containsIndex(p.l) && !containsIndex(p.r)) {
-                    "@XmlChild path '$path' for '$fieldName': positional predicate inside 'or' is not supported. Use chained brackets ('[@x=\"v\"][N]') or 'and' to combine filters."
-                }
-                validateChildPredicate(p.l, path, fieldName, onDescendantHead)
-                validateChildPredicate(p.r, path, fieldName, onDescendantHead)
-            }
-        }
-    }
-
-    private fun buildPolyChild(
-        sealedDecl: KSClassDeclaration,
-        rawPath: String,
-        fieldName: String,
-        nsMap: Map<String, String>,
-        registry: NestedTypeRegistry,
-    ): Source.PolyChild {
-        // sealedDecl is selected upstream via takeIf { ... annotationOf(it, XML_POLYMORPHIC_FQ) != null };
-        // the annotation is guaranteed present here.
-        val polyAnnot = annotationOf(sealedDecl, XML_POLYMORPHIC_FQ)!!
-        val discriminator = stringArg(polyAnnot, "discriminator").orEmpty()
-
-        val subtypes = sealedDecl.getSealedSubclasses().toList()
-        vRequire(subtypes.isNotEmpty()) {
-            "polymorphic field '$fieldName': sealed type ${sealedDecl.qualifiedName?.asString()} has no subclasses"
-        }
-        for (s in subtypes) {
-            vRequire(Modifier.DATA in s.modifiers) {
-                "polymorphic field '$fieldName': subtype ${s.qualifiedName?.asString()} must be a data class"
-            }
-            vRequire(annotationOf(s, XML_SUBTYPE_FQ) != null) {
-                "polymorphic field '$fieldName': subtype ${s.qualifiedName?.asString()} missing @XmlSubtype"
-            }
-        }
-
-        for (s in subtypes) ensureNested(s, nsMap, registry, terminating = true)
-
-        if (discriminator.isEmpty()) {
-            vRequire(rawPath.isEmpty()) {
-                "polymorphic field '$fieldName': tag-mode @XmlChild path must be empty (got '$rawPath'); subtype tags drive dispatch"
-            }
-            val variants = subtypes.map { sub ->
-                val subAnnot = annotationOf(sub, XML_SUBTYPE_FQ)!!
-                val subName = stringArg(subAnnot, "name")!!
-                val (ns, local) = resolveQName(
-                    subName, nsMap,
-                    defaultNs = nsMap[""],
-                    path = subName, field = fieldName,
-                    ctx = "@XmlSubtype",
-                )
-                TagVariant(ns, local, sub.qualifiedName!!.asString())
-            }
-            val keys = variants.map { QKey(it.ns, it.local) }
-            vRequire(keys.toSet().size == keys.size) {
-                "polymorphic field '$fieldName': duplicate @XmlSubtype tags across variants"
-            }
-            return Source.PolyChild(PolyDispatch.Tag(variants))
-        } else {
-            vRequire(discriminator.startsWith("@")) {
-                "polymorphic field '$fieldName': @XmlPolymorphic.discriminator must start with '@' (got '$discriminator')"
-            }
-            val attrRaw = discriminator.substring(1)
-            vRequire(attrRaw.isNotEmpty() && '/' !in attrRaw) {
-                "polymorphic field '$fieldName': bad discriminator '$discriminator'"
-            }
-            val (attrNs, attrLocal) = resolveQName(
-                attrRaw, nsMap, defaultNs = null,
-                path = discriminator, field = fieldName, ctx = "@XmlPolymorphic discriminator",
-            )
-            vRequire(rawPath.isNotBlank()) {
-                "polymorphic field '$fieldName': attr-mode @XmlChild requires the wrapping element path"
-            }
-            vRequire(!rawPath.startsWith("//") && '/' !in rawPath && !rawPath.startsWith("@")) {
-                "polymorphic field '$fieldName': attr-mode @XmlChild path must be a single direct-child element (got '$rawPath')"
-            }
-            val (wrapNs, wrapLocal) = resolveQName(
-                rawPath, nsMap, defaultNs = nsMap[""],
-                path = rawPath, field = fieldName,
-            )
-            val variants = subtypes.map { sub ->
-                val subAnnot = annotationOf(sub, XML_SUBTYPE_FQ)!!
-                val value = stringArg(subAnnot, "name")!!
-                AttrVariant(value, sub.qualifiedName!!.asString())
-            }
-            vRequire(variants.map { it.value }.toSet().size == variants.size) {
-                "polymorphic field '$fieldName': duplicate @XmlSubtype values across variants"
-            }
-            return Source.PolyChild(PolyDispatch.Attr(wrapNs, wrapLocal, attrNs, attrLocal, variants))
-        }
-    }
-
-    private fun resolveQName(
-        s: String,
-        nsMap: Map<String, String>,
-        defaultNs: String?,
-        path: String,
-        field: String,
-        ctx: String = "@XmlChild",
-    ): Pair<String?, String> {
-        val ci = s.indexOf(':')
-        if (ci < 0) return defaultNs to s
-        val prefix = s.substring(0, ci)
-        val local = s.substring(ci + 1)
-        vRequire(prefix.isNotEmpty() && local.isNotEmpty()) {
-            "$ctx path '$path' for '$field': bad qname '$s'"
-        }
-        val ns = nsMap[prefix]
-            ?: vError("$ctx path '$path' for '$field': unbound NS prefix '$prefix' (declare via @XmlNs)")
-        return ns to local
-    }
-
-    private fun validateChildPaths(cls: KSClassDeclaration, fields: List<FieldSpec>) {
-        val root = TrieNode()
-        val directKeys = mutableSetOf<QKey>()
-        for (f in fields) {
-            val src = f.source as? Source.Child ?: continue
-            if (src.descendant) continue
-            insertIntoTrie(root, src.segments, f)
-            (src.segments.firstOrNull() as? PathSeg.Element)?.let { directKeys += QKey(it.ns, it.name) }
-        }
-        validateTrie(root, cls)
-
-        val descendantHeads = mutableSetOf<QKey>()
-        for (f in fields) {
-            val src = f.source as? Source.Child ?: continue
-            if (!src.descendant) continue
-            (src.segments.firstOrNull() as? PathSeg.Element)?.let { descendantHeads += QKey(it.ns, it.name) }
-        }
-        val collision = directKeys intersect descendantHeads
-        if (collision.isNotEmpty()) {
-            val k = collision.first()
-            vError("${cls.qualifiedName?.asString()}: @XmlChild('${k.local}') and @XmlChild('//${k.local}') target the same head element '${k.local}'; pick one")
-        }
-
-        val seenMapEntries = mutableSetOf<QKey>()
-        for (f in fields) {
-            val src = f.source as? Source.MapEntry ?: continue
-            val key = QKey(src.entryNs, src.entryLocal)
-            if (key in directKeys) {
-                vError("${cls.qualifiedName?.asString()}: @XmlMap entry '${src.entryLocal}' on field '${f.name}' clashes with another @XmlChild's first segment")
-            }
-            if (key in descendantHeads) {
-                vError("${cls.qualifiedName?.asString()}: @XmlMap entry '${src.entryLocal}' on field '${f.name}' clashes with a descendant @XmlChild('//${key.local}') head")
-            }
-            if (!seenMapEntries.add(key)) {
-                vError("${cls.qualifiedName?.asString()}: duplicate @XmlMap entry '${src.entryLocal}' on field '${f.name}'")
-            }
-        }
-
-        val seenPolyKeys = mutableSetOf<QKey>()
-        var sawTagMode = false
-        for (f in fields) {
-            val src = f.source as? Source.PolyChild ?: continue
-            when (val d = src.dispatch) {
-                is PolyDispatch.Tag -> {
-                    if (sawTagMode) {
-                        vError("${cls.qualifiedName?.asString()}: more than one tag-mode polymorphic @XmlChild field at the same scope (field '${f.name}')")
-                    }
-                    sawTagMode = true
-                    for (v in d.variants) {
-                        val k = QKey(v.ns, v.local)
-                        if (k in directKeys || k in seenMapEntries || !seenPolyKeys.add(k)) {
-                            vError("${cls.qualifiedName?.asString()}: polymorphic subtype tag '${v.local}' on field '${f.name}' clashes with another @XmlChild / @XmlMap / subtype")
-                        }
-                        if (k in descendantHeads) {
-                            vError("${cls.qualifiedName?.asString()}: polymorphic subtype tag '${v.local}' on field '${f.name}' clashes with a descendant @XmlChild('//${k.local}') head")
-                        }
-                    }
-                }
-                is PolyDispatch.Attr -> {
-                    val k = QKey(d.wrapNs, d.wrapLocal)
-                    if (k in directKeys || k in seenMapEntries || !seenPolyKeys.add(k)) {
-                        vError("${cls.qualifiedName?.asString()}: polymorphic wrap tag '${d.wrapLocal}' on field '${f.name}' clashes with another @XmlChild / @XmlMap / subtype")
-                    }
-                    if (k in descendantHeads) {
-                        vError("${cls.qualifiedName?.asString()}: polymorphic wrap tag '${d.wrapLocal}' on field '${f.name}' clashes with a descendant @XmlChild('//${k.local}') head")
-                    }
-                }
-            }
-        }
-    }
-
-    private fun insertIntoTrie(root: TrieNode, segments: List<PathSeg>, f: FieldSpec) {
-        var node = root
-        val elements = segments.takeWhile { it is PathSeg.Element }
-            .map { it as PathSeg.Element }
-        val tail = segments.drop(elements.size)
-        for (e in elements) {
-            val edge = EdgeKey(QKey(e.ns, e.name), e.brackets)
-            node = node.children.getOrPut(edge) { TrieNode() }
-        }
-        when {
-            tail.isEmpty() -> {
-                if (f.coerce is Coerce.Nested) node.nestedEntries += f
-                else node.textEntries += f
-            }
-
-            tail.size == 1 && tail[0] is PathSeg.AttrLeaf -> {
-                val al = tail[0] as PathSeg.AttrLeaf
-                node.attrEntries += Triple(al.ns, al.name, f)
-            }
-
-            else -> vError("invalid path tail for field '${f.name}'")
-        }
-    }
-
-    private fun validateTrie(node: TrieNode, cls: KSClassDeclaration) {
-        val mixCount = listOf(
-            node.textEntries.isNotEmpty(),
-            node.nestedEntries.isNotEmpty(),
-            node.children.isNotEmpty(),
-        ).count { it }
-        if (mixCount > 1) {
-            val texts = node.textEntries.joinToString { it.name }
-            val nested = node.nestedEntries.joinToString { it.name }
-            vError("${cls.qualifiedName?.asString()}: cannot mix text/nested/descend at same element [text=$texts nested=$nested children=${node.children.size}]")
-        }
-        val nonListText = node.textEntries.count { !it.isList }
-        if (nonListText > 1) {
-            val names = node.textEntries.filter { !it.isList }.joinToString { it.name }
-            vError("${cls.qualifiedName?.asString()}: multiple non-list text fields [$names] target same element")
-        }
-        val nonListNested = node.nestedEntries.count { !it.isList }
-        if (nonListNested > 1) {
-            val names = node.nestedEntries.filter { !it.isList }.joinToString { it.name }
-            vError("${cls.qualifiedName?.asString()}: multiple non-list nested fields [$names] target same element")
-        }
-        if (node.nestedEntries.size > 1 &&
-            node.nestedEntries.any { it.isList } && node.nestedEntries.any { !it.isList }
-        ) {
-            vError("${cls.qualifiedName?.asString()}: cannot mix list and non-list nested fields at same element")
-        }
-        for (c in node.children.values) validateTrie(c, cls)
+        val fqn = cls.qualifiedName?.asString() ?: return
+        val symbol = symbolProvider.lookupRecord(fqn) ?: return
+        val core = xmlfluss.codegen.classify.CoreClassifier(symbolProvider)
+        val coreSpec = core.classify(symbol) ?: return
+        val plan = DispatchPlanBuilder.build(coreSpec, core.registry())
+        emitFile(coreSpec, plan, core.registry())
     }
 
     private fun emitFile(
-        cls: KSClassDeclaration,
-        recordPath: String,
-        nsMap: Map<String, String>,
-        fields: List<FieldSpec>,
-        registry: NestedTypeRegistry,
+        coreSpec: CoreRecordSpec,
+        plan: DispatchPlan,
+        registry: CoreNestedRegistry,
     ) {
-        val pkg = cls.packageName.asString()
-        val recordTypeName = ClassName(pkg, cls.simpleName.asString())
-        val parserName = "${cls.simpleName.asString()}Parser"
+        val origin = coreSpec.originatingHandle() as? KSClassDeclaration
+            ?: error(
+                "KSP originatingHandle must be a KSClassDeclaration for ${coreSpec.packageName()}.${coreSpec.simpleName()}, got " +
+                    (coreSpec.originatingHandle()?.javaClass?.name ?: "null"),
+            )
+        val pkg = coreSpec.packageName()
+        val recordTypeName = TypeRefs.toClassName(CoreTypeRef.of(pkg, coreSpec.simpleName()))
+        val parserName = "${coreSpec.simpleName()}Parser"
 
         val flowOfRecord = FLOW.parameterizedBy(recordTypeName)
 
         val nsProp = PropertySpec.builder("NS", MAP.parameterizedBy(STRING, STRING))
             .addModifiers(KModifier.PRIVATE)
-            .initializer(buildNsInitializer(nsMap))
+            .initializer(buildNsInitializer(coreSpec.nsMap()))
             .build()
 
         val pathProp = PropertySpec.builder("PATH", COMPILED_PATH)
             .addModifiers(KModifier.PRIVATE)
-            .initializer("%M(%S, NS)", PATHS_COMPILE, recordPath)
+            .initializer("%M(%S, NS)", PATHS_COMPILE, coreSpec.recordPath())
             .build()
 
         val convVarFor = mutableMapOf<String, String>()
         val convProps = mutableListOf<PropertySpec>()
-        fun registerConverter(c: Coerce.Custom) {
-            val key = c.cls.canonicalName
+        fun registerConverter(c: CoreCoerce.Custom) {
+            val cls = TypeRefs.toClassName(c.converterClass())
+            val key = cls.canonicalName
             if (key in convVarFor) return
             val varName = "__conv_${convVarFor.size}"
             convVarFor[key] = varName
-            convProps += PropertySpec.builder(varName, c.cls)
+            convProps += PropertySpec.builder(varName, cls)
                 .addModifiers(KModifier.PRIVATE)
-                .initializer("%T()", c.cls)
+                .initializer("%T()", cls)
                 .build()
         }
-        for (f in fields) (f.coerce as? Coerce.Custom)?.let(::registerConverter)
-        for (n in registry.byFq.values) for (f in n.fields) (f.coerce as? Coerce.Custom)?.let(::registerConverter)
+        for (f in coreSpec.fields()) (f.coerce() as? CoreCoerce.Custom)?.let(::registerConverter)
+        for (n in registry.byFq().values) for (f in n.fields()) (f.coerce() as? CoreCoerce.Custom)?.let(::registerConverter)
 
         val parseFun = FunSpec.builder("parse")
             // @JvmOverloads lets Java callers omit `ignoreNamespace` and call parse(input)
@@ -840,15 +157,20 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
                     .build()
             )
             .returns(flowOfRecord)
-            .addCode(buildParseBody(recordTypeName, fields, convVarFor, registry))
+            .addCode(buildParseBody(recordTypeName, coreSpec.fields(), convVarFor, registry, plan))
             .build()
 
-        val nestedHelpers = registry.byFq.values.map { spec ->
-            FunSpec.builder(spec.helperName)
+        val nestedHelpers = registry.byFq().entries.map { (fq, spec) ->
+            val nestedPlan = plan.byFq()[fq]
+                ?: error("DispatchPlan missing for nested record $fq")
+            val nestedType = TypeRefs.toClassName(
+                CoreTypeRef.of(spec.packageName(), spec.simpleName())
+            )
+            FunSpec.builder(registry.helperName(fq))
                 .addModifiers(KModifier.PRIVATE)
                 .addParameter("c", XML_READ_CURSOR)
-                .returns(spec.typeName)
-                .addCode(buildSubrecordBody(spec, convVarFor, registry))
+                .returns(nestedType)
+                .addCode(buildSubrecordBody(nestedType, spec, convVarFor, registry, nestedPlan))
                 .build()
         }
 
@@ -858,7 +180,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         for (p in convProps) parserBuilder.addProperty(p)
         for (h in nestedHelpers) parserBuilder.addFunction(h)
         parserBuilder.addFunction(parseFun)
-        parserBuilder.addOriginatingKSFile(cls.containingFile!!)
+        parserBuilder.addOriginatingKSFile(origin.containingFile!!)
 
         val file = FileSpec.builder(pkg, parserName)
             .addAnnotation(
@@ -868,8 +190,16 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
                     .build()
             )
             .addAnnotation(
+                // Surviving suppressions:
+                //  - RedundantExplicitType: PropertySpec always emits a type for object members
+                //    (NS, PATH, __conv_<N>); we can't drop it without a different KotlinPoet API.
+                //  - RedundantVisibilityModifier: KotlinPoet emits `public` on top-level objects
+                //    and member functions by default; the only alternative is to change visibility.
+                //  - LocalVariableName: locals are prefixed with `__` to guarantee no collision
+                //    with user-declared record fields (e.g. a record field named `t` would shadow
+                //    the synthetic `__t`). Renaming would require name-mangling logic.
                 AnnotationSpec.builder(Suppress::class)
-                    .addMember("\"FunctionName\", \"RedundantExplicitType\", \"RedundantVisibilityModifier\", \"LocalVariableName\", \"IfThenToSafeAccess\"")
+                    .addMember("\"RedundantExplicitType\", \"RedundantVisibilityModifier\", \"LocalVariableName\"")
                     .build()
             )
             .addType(parserBuilder.build())
@@ -888,15 +218,16 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
 
     private fun buildParseBody(
         recordType: ClassName,
-        fields: List<FieldSpec>,
+        fields: List<CoreFieldSpec>,
         convVarFor: Map<String, String>,
-        registry: NestedTypeRegistry,
+        registry: CoreNestedRegistry,
+        plan: DispatchPlan,
     ): CodeBlock {
         val cb = CodeBlock.builder()
         cb.beginControlFlow("return·%M", FLOW_BUILDER)
         cb.beginControlFlow("%T(input,·PATH,·ignoreNamespace).use·{ c ->\n", XML_READ_CURSOR)
         cb.beginControlFlow("while (c.findNextRecord())")
-        emitInstanceBody(cb, recordType, fields, convVarFor, registry, ctx = Ctx.RECORD)
+        emitInstanceBody(cb, recordType, fields, convVarFor, registry, plan, ctx = Ctx.RECORD)
         cb.endControlFlow()
         cb.endControlFlow()
         cb.endControlFlow()
@@ -904,28 +235,31 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
     }
 
     private fun buildSubrecordBody(
-        spec: NestedTypeSpec,
+        type: ClassName,
+        spec: CoreRecordSpec,
         convVarFor: Map<String, String>,
-        registry: NestedTypeRegistry,
+        registry: CoreNestedRegistry,
+        plan: DispatchPlan,
     ): CodeBlock {
         val cb = CodeBlock.builder()
-        emitInstanceBody(cb, spec.typeName, spec.fields, convVarFor, registry, ctx = Ctx.SUBRECORD)
+        emitInstanceBody(cb, type, spec.fields(), convVarFor, registry, plan, ctx = Ctx.SUBRECORD)
         return cb.build()
     }
 
     private fun emitInstanceBody(
         cb: CodeBlock.Builder,
         type: ClassName,
-        fields: List<FieldSpec>,
+        fields: List<CoreFieldSpec>,
         convVarFor: Map<String, String>,
-        registry: NestedTypeRegistry,
+        registry: CoreNestedRegistry,
+        plan: DispatchPlan,
         ctx: Ctx,
     ) {
-        val attrFields = fields.filter { it.source is Source.Attr }
-        val textField = fields.firstOrNull { it.source is Source.Text }
-        val childFields = fields.filter { it.source is Source.Child }
-        val mapFields = fields.filter { it.source is Source.MapEntry }
-        val polyFields = fields.filter { it.source is Source.PolyChild }
+        val attrFields = fields.filter { it.source() is CoreSource.Attr }
+        val textField = fields.firstOrNull { it.source() is CoreSource.Text }
+        val childFields = fields.filter { it.source() is CoreSource.Child }
+        val mapFields = fields.filter { it.source() is CoreSource.MapEntry }
+        val polyFields = fields.filter { it.source() is CoreSource.PolyChild }
 
         val attrFn = if (ctx == Ctx.RECORD) "recordAttr" else "childAttr"
         val forEachFn = if (ctx == Ctx.RECORD) "forEachRecordChild" else "forEachSubrecordChild"
@@ -935,36 +269,28 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         cb.add("val __loc: %T = c.${locFn}()\n", LOCATION)
 
         for (f in attrFields) {
-            val src = f.source as Source.Attr
-            val nsLit: CodeBlock = if (src.ns == null) CodeBlock.of("null") else CodeBlock.of("%S", src.ns)
-            cb.add("val __raw_${f.name}: %T = c.${attrFn}(%L, %S)\n", STRING_NULLABLE, nsLit, src.name)
+            val src = f.source() as CoreSource.Attr
+            val nsLit: CodeBlock = if (src.ns() == null) CodeBlock.of("null") else CodeBlock.of("%S", src.ns())
+            cb.add("val __raw_${f.name()}: %T = c.${attrFn}(%L, %S)\n", STRING_NULLABLE, nsLit, src.name())
         }
 
         for (f in childFields + polyFields + listOfNotNull(textField)) emitFieldStateInit(cb, f)
         for (mf in mapFields) emitMapStateInit(cb, mf)
-
-        val descendantFields = childFields.filter { (it.source as Source.Child).descendant }
-        val directFields = childFields.filter { !(it.source as Source.Child).descendant }
 
         // Invariant: textField != null  ⇒  needTraverse == true (textField is one of the
         // disjuncts below). coerceField below reads `__raw_${textField.name}` unconditionally,
         // so the declaration emitted inside this block is always reached when textField != null.
         val needTraverse = childFields.isNotEmpty() || textField != null || mapFields.isNotEmpty() || polyFields.isNotEmpty()
         if (needTraverse) {
-            val root = TrieNode()
-            for (f in directFields) {
-                val src = f.source as Source.Child
-                insertIntoTrie(root, src.segments, f)
-            }
             // Counter slots must be declared OUTSIDE the per-sibling lambda so that ++__cnt[0]
             // accumulates across siblings rather than resetting per iteration.
-            val slots = declareCounterSlots(cb, groupChildrenByQKey(root))
+            declareSlotsCode(cb, plan.slots())
             cb.beginControlFlow("c.${forEachFn}·{ ln, ns ->\n")
-            emitTopLevelChildSwitch(cb, root, slots, descendantFields, mapFields, polyFields, registry, convVarFor)
+            emitTopLevelChildSwitch(cb, plan, registry, convVarFor)
             cb.endControlFlow()
             if (textField != null) {
-                val preserve = (textField.source as Source.Text).preserveWhitespace
-                cb.add("val __raw_${textField.name}: %T = c.${textFn}($preserve)\n", STRING)
+                val preserve = (textField.source() as CoreSource.Text).preserveWhitespace()
+                cb.add("val __raw_${textField.name()}: %T = c.${textFn}($preserve)\n", STRING)
             }
         }
 
@@ -973,44 +299,61 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         val emitVerb = if (ctx == Ctx.RECORD) "emit" else "return"
         cb.add("$emitVerb(%T(\n", type)
         cb.indent()
-        for (f in fields) cb.add("${f.name} = __final_${f.name},\n")
+        for (f in fields) cb.add("${f.name()} = __final_${f.name()},\n")
         cb.unindent()
         cb.add("))\n")
     }
 
-    private fun emitFieldStateInit(cb: CodeBlock.Builder, f: FieldSpec) {
+    /**
+     * KSP-side "is this field nullable in Kotlin source"? Lists are always non-null on
+     * the Kotlin side (the runtime contract is "no matches → empty list"); CoreFieldSpec
+     * stores `required = !nullable && !isList`, so a List field reports `required = false`
+     * even though Lists never carry the `?` marker. Treat list fields as non-nullable to
+     * keep the emitted KotlinPoet type stable; only scalar/nested fields honour the
+     * required flag for their `?` marker.
+     */
+    private fun fieldNullable(f: CoreFieldSpec): Boolean = !f.required() && !f.isList
+
+    private fun fieldTypeName(f: CoreFieldSpec): TypeName {
+        val base = TypeRefs.toTypeName(f.fieldType())
+        return if (fieldNullable(f)) base.copy(nullable = true) else base
+    }
+
+    private fun elemTypeName(f: CoreFieldSpec): TypeName = TypeRefs.toTypeName(f.elemType())
+
+    private fun emitFieldStateInit(cb: CodeBlock.Builder, f: CoreFieldSpec) {
         // Source.Text is declared and assigned in one go at the recordText/subrecordText call
         // site (see emitParseBody). No state needed up front — the cursor always provides a
         // String, so the early `var __raw_X: String? = null` would just be a dead initializer.
-        if (f.source is Source.Text) return
+        if (f.source() is CoreSource.Text) return
         when {
-            f.coerce is Coerce.Nested && f.isList -> {
+            f.coerce() is CoreCoerce.Nested && f.isList -> {
                 cb.add(
-                    "val __list_${f.name}: %T = mutableListOf()\n",
-                    MUTABLE_LIST.parameterizedBy(f.elemTypeName)
+                    "val __list_${f.name()}: %T = mutableListOf()\n",
+                    MUTABLE_LIST.parameterizedBy(elemTypeName(f))
                 )
             }
 
-            f.coerce is Coerce.Nested -> {
-                cb.add("var __set_${f.name}: %T = false\n", BOOLEAN)
+            f.coerce() is CoreCoerce.Nested -> {
+                cb.add("var __set_${f.name()}: %T = false\n", BOOLEAN)
                 cb.add(
-                    "var __nested_${f.name}: %T = null\n",
-                    f.elemTypeName.copy(nullable = true)
+                    "var __nested_${f.name()}: %T = null\n",
+                    elemTypeName(f).copy(nullable = true)
                 )
             }
 
             f.isList -> {
                 cb.add(
-                    "val __list_${f.name}: %T = mutableListOf()\n",
+                    "val __list_${f.name()}: %T = mutableListOf()\n",
                     MUTABLE_LIST.parameterizedBy(STRING)
                 )
             }
 
             else -> {
-                cb.add("var __set_${f.name}: %T = false\n", BOOLEAN)
-                cb.add("var __raw_${f.name}: %T = null\n", STRING_NULLABLE)
+                cb.add("var __set_${f.name()}: %T = false\n", BOOLEAN)
+                cb.add("var __raw_${f.name()}: %T = null\n", STRING_NULLABLE)
                 if (needsChildLoc(f)) {
-                    cb.add("var __loc_${f.name}: %T = null\n", LOCATION_NULLABLE)
+                    cb.add("var __loc_${f.name()}: %T = null\n", LOCATION_NULLABLE)
                 }
             }
         }
@@ -1022,48 +365,57 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
      * `Source.Child`. `AsString`, `Nested`, and list paths never reference `__loc_X`, so emitting
      * it would be dead code.
      */
-    private fun needsChildLoc(f: FieldSpec): Boolean =
-        f.source is Source.Child && !f.isList &&
-            f.coerce !is Coerce.AsString && f.coerce !is Coerce.Nested
+    private fun needsChildLoc(f: CoreFieldSpec): Boolean =
+        f.source() is CoreSource.Child && !f.isList &&
+            f.coerce() !is CoreCoerce.AsString && f.coerce() !is CoreCoerce.Nested
 
-    private fun emitMapStateInit(cb: CodeBlock.Builder, f: FieldSpec) {
+    private fun emitMapStateInit(cb: CodeBlock.Builder, f: CoreFieldSpec) {
         // emitMapStateInit only runs for Coerce.MapAggregate fields built by classifyMapParam,
         // which always sets mapKeyField / mapValueField.
-        val keyF = f.mapKeyField!!
-        val valF = f.mapValueField!!
+        val keyF = requireNotNull(f.mapKeyField()) {
+            "MapAggregate field ${f.name()} missing synthetic key spec — bug in CoreClassifier"
+        }
+        val valF = requireNotNull(f.mapValueField()) {
+            "MapAggregate field ${f.name()} missing synthetic value spec — bug in CoreClassifier"
+        }
         val storedValueType: TypeName =
-            if (valF.isList) MUTABLE_LIST.parameterizedBy(valF.elemTypeName) else valF.typeName
-        val storeType = MUTABLE_MAP.parameterizedBy(keyF.typeName, storedValueType)
-        cb.add("val __map_${f.name}: %T = %M()\n", storeType, LINKED_MAP_OF)
-        if (f.nullable) cb.add("var __set_${f.name}: %T = false\n", BOOLEAN)
+            if (valF.isList) MUTABLE_LIST.parameterizedBy(elemTypeName(valF)) else fieldTypeName(valF)
+        val storeType = MUTABLE_MAP.parameterizedBy(fieldTypeName(keyF), storedValueType)
+        cb.add("val __map_${f.name()}: %T = %M()\n", storeType, LINKED_MAP_OF)
+        if (fieldNullable(f)) cb.add("var __set_${f.name()}: %T = false\n", BOOLEAN)
     }
 
     private fun emitMapEntryCase(
         cb: CodeBlock.Builder,
-        f: FieldSpec,
-        registry: NestedTypeRegistry,
+        f: CoreFieldSpec,
+        mp: MapPlan,
+        registry: CoreNestedRegistry,
         convVarFor: Map<String, String>,
     ) {
         // Same invariant as emitMapStateInit: MapAggregate fields always carry both synthetic
         // key/value FieldSpecs.
-        val keyF = f.mapKeyField!!
-        val valF = f.mapValueField!!
+        val keyF = requireNotNull(f.mapKeyField()) {
+            "MapAggregate field ${f.name()} missing synthetic key spec — bug in CoreClassifier"
+        }
+        val valF = requireNotNull(f.mapValueField()) {
+            "MapAggregate field ${f.name()} missing synthetic value spec — bug in CoreClassifier"
+        }
         val synthetic = listOf(keyF, valF)
 
         for (sf in synthetic) {
-            val src = sf.source
-            if (src is Source.Attr) {
-                val nsLit: CodeBlock = if (src.ns == null) CodeBlock.of("null") else CodeBlock.of("%S", src.ns)
+            val src = sf.source()
+            if (src is CoreSource.Attr) {
+                val nsLit: CodeBlock = if (src.ns() == null) CodeBlock.of("null") else CodeBlock.of("%S", src.ns())
                 if (sf.isList) {
                     cb.add(
-                        "val __list_${sf.name}: %T = mutableListOf()\n",
+                        "val __list_${sf.name()}: %T = mutableListOf()\n",
                         MUTABLE_LIST.parameterizedBy(STRING)
                     )
-                    cb.add("c.childAttr(%L, %S)?.let { __list_${sf.name}.add(it) }\n", nsLit, src.name)
+                    cb.add("c.childAttr(%L, %S)?.let { __list_${sf.name()}.add(it) }\n", nsLit, src.name())
                 } else {
                     cb.add(
-                        "val __raw_${sf.name}: %T = c.childAttr(%L, %S)\n",
-                        STRING_NULLABLE, nsLit, src.name
+                        "val __raw_${sf.name()}: %T = c.childAttr(%L, %S)\n",
+                        STRING_NULLABLE, nsLit, src.name()
                     )
                 }
             } else {
@@ -1071,15 +423,10 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             }
         }
 
-        val childSyn = synthetic.filter { it.source is Source.Child }
-        if (childSyn.isNotEmpty()) {
-            val descendF = childSyn.filter { (it.source as Source.Child).descendant }
-            val directF = childSyn.filter { !(it.source as Source.Child).descendant }
-            val root = TrieNode()
-            for (df in directF) insertIntoTrie(root, (df.source as Source.Child).segments, df)
-            val slots = declareCounterSlots(cb, groupChildrenByQKey(root))
+        if (mp.directRoot().children().isNotEmpty() || mp.descendantByHead().isNotEmpty()) {
+            declareSlotsCode(cb, mp.slots())
             cb.beginControlFlow("c.forEachSubrecordChild·{ ln, ns ->\n")
-            emitTopLevelChildSwitch(cb, root, slots, descendF, emptyList(), emptyList(), registry, convVarFor)
+            emitMapEntrySwitch(cb, mp, registry, convVarFor)
             cb.endControlFlow()
         }
 
@@ -1088,98 +435,78 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
 
         if (valF.isList) {
             cb.add(
-                "__map_${f.name}.getOrPut(__final_${keyF.name}) { mutableListOf() }.addAll(__final_${valF.name})\n"
+                "__map_${f.name()}.getOrPut(__final_${keyF.name()}) { mutableListOf() }.addAll(__final_${valF.name()})\n"
             )
         } else {
-            cb.add("__map_${f.name}[__final_${keyF.name}] = __final_${valF.name}\n")
+            cb.add("__map_${f.name()}[__final_${keyF.name()}] = __final_${valF.name()}\n")
         }
-        if (f.nullable) cb.add("__set_${f.name} = true\n")
+        if (fieldNullable(f)) cb.add("__set_${f.name()} = true\n")
     }
 
     /**
      * Emits the inside-lambda body of a `forEachChild { ln, ns -> ... }` switch over the direct
-     * children of [node]. Counter slot declarations live OUTSIDE the lambda — callers obtain them
-     * via [declareCounterSlots] and pass them in via [slots] so the IntArray persists across
-     * sibling iterations.
+     * children of [node]. Counter slot declarations live OUTSIDE the lambda — callers obtain the
+     * pre-built [SlotTable] from the plan and pass it in via [slots] so the IntArray persists
+     * across sibling iterations.
      */
     private fun emitChildrenSwitch(
         cb: CodeBlock.Builder,
         node: TrieNode,
-        slots: Map<PrefixKey, String>,
-        registry: NestedTypeRegistry,
+        slots: SlotTable,
+        registry: CoreNestedRegistry,
     ) {
-        if (node.children.isEmpty()) {
+        if (node.children().isEmpty()) {
             cb.add(SKIP_CHILD)
             return
         }
-        val grouped = groupChildrenByQKey(node)
         cb.beginControlFlow("when(ln)")
-        for ((qk, branches) in grouped) {
-            val cond = qnameCond(qk.ns, qk.local)
-            cb.beginControlFlow("%L ->", cond)
-            emitPredicateBranches(cb, qk, branches, slots, registry)
-            cb.endControlFlow()
-        }
+        emitGroupedChildArms(cb, node.groupChildrenByQKey(), slots, registry)
         cb.add(ELSE_SKIP_CHILD)
         cb.endControlFlow()
     }
 
-    private fun groupChildrenByQKey(node: TrieNode): LinkedHashMap<QKey, MutableList<Pair<List<PathPredicate>, TrieNode>>> {
-        val grouped = LinkedHashMap<QKey, MutableList<Pair<List<PathPredicate>, TrieNode>>>()
-        for ((edge, child) in node.children) {
-            grouped.getOrPut(edge.qkey) { mutableListOf() }.add(edge.brackets to child)
-        }
-        return grouped
-    }
-
-    /**
-     * Emits `IntArray(1)` declarations for each `(qkey, prefix)` slot needed by direct edges in
-     * [grouped] that contain a positional predicate. Returns a map from `PrefixKey` to the slot
-     * variable name so call sites can reference `__cnt_<name>`/`__pre_<name>`/`__pos_<name>`.
-     */
-    private fun declareCounterSlots(
+    /** Emit `local -> { … }` arms over a [TrieNode.groupChildrenByQKey] map inside an open `when(ln)` block. */
+    private fun emitGroupedChildArms(
         cb: CodeBlock.Builder,
-        grouped: Map<QKey, List<Pair<List<PathPredicate>, TrieNode>>>,
-    ): Map<PrefixKey, String> {
-        val slots = LinkedHashMap<PrefixKey, String>()
+        grouped: Map<CoreQKey, List<Map.Entry<List<PathPredicate>, TrieNode>>>,
+        slots: SlotTable,
+        registry: CoreNestedRegistry,
+    ) {
         for ((qk, branches) in grouped) {
-            for ((brackets, _) in branches) {
-                if (!bracketsHaveIndex(brackets)) continue
-                val prefix = prefixOfFirstIndex(brackets)
-                val key = PrefixKey(qk, prefix)
-                if (key in slots) continue
-                val name = slotName(qk, slots.size)
-                slots[key] = name
-                cb.add("val __cnt_%L: %T = intArrayOf(0)\n", name, INT_ARRAY)
-            }
+            val cond = qnameCond(qk.ns(), qk.local())
+            cb.beginControlFlow("%L ->", cond)
+            emitPredicateBranches(cb, qk, branches, slots, registry)
+            cb.endControlFlow()
         }
-        return slots
     }
 
     private fun emitPredicateBranches(
         cb: CodeBlock.Builder,
-        qkey: QKey,
-        branches: List<Pair<List<PathPredicate>, TrieNode>>,
-        slots: Map<PrefixKey, String>,
-        registry: NestedTypeRegistry,
+        qkey: CoreQKey,
+        branches: List<Map.Entry<List<PathPredicate>, TrieNode>>,
+        slots: SlotTable,
+        registry: CoreNestedRegistry,
     ) {
         // Per-element pre-compute: increment any counters that key on this qname BEFORE the
         // two-pass dispatch. Each element produces exactly one increment per slot, regardless of
         // how many attr-only / body branches reference that slot.
-        val slotsAtQName: Map<PrefixKey, String> = slots.filterKeys { it.qkey == qkey }
-        for ((key, name) in slotsAtQName) {
-            if (key.prefix.isEmpty()) {
+        for (slotEntry in slots) {
+            val key = slotEntry.key
+            if (key.qkey() != qkey) continue
+            val name = slotEntry.value
+            if (key.prefix().isEmpty()) {
                 // No prefix guard — unconditionally increment.
                 cb.add("val __pos_%L: %T = ++__cnt_%L[0]\n", name, INT, name)
             } else {
-                val preExpr: CodeBlock = plainPredicateExpr(key.prefix.reduce { a, b -> PathPredicate.And(a, b) })
+                val folded = key.prefix().reduce { a, b -> PathPredicate.And(a, b) }
+                val preExpr: CodeBlock = plainPredicateExpr(folded)
                 cb.add("val __pre_%L: %T = %L\n", name, BOOLEAN, preExpr)
                 cb.add("val __pos_%L: %T = if (__pre_%L) ++__cnt_%L[0] else 0\n", name, INT, name, name)
             }
         }
 
-        if (branches.size == 1 && branches[0].first.isEmpty()) {
-            emitChildBody(cb, branches[0].second, registry)
+        if (branches.size == 1 && branches[0].key.isEmpty()) {
+            emitChildBody(cb, branches[0].value, registry)
             return
         }
         // Two-pass dispatch when predicate variants overlap on the same element:
@@ -1190,78 +517,75 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         //     would race and only the first matching arm would fire.
         //  2. Body-consuming variants (text / nested / descend) dispatch first-match-wins —
         //     a single element body can only be consumed once.
-        for ((brackets, child) in branches) {
-            if (child.attrEntries.isEmpty()) continue
-            val expr = predicateExpr(brackets, qkey, slots)
+        for (entry in branches) {
+            val child = entry.value
+            if (child.attrEntries().isEmpty()) continue
+            val expr = predicateExpr(entry.key, qkey, slots)
             cb.beginControlFlow("if (%L)", expr)
             emitAttrEntries(cb, child)
             cb.endControlFlow()
         }
-        val bodyBranches = branches.filter { (_, n) -> nodeHasBodyContent(n) }
+        val bodyBranches = branches.filter { it.value.hasBodyContent() }
         if (bodyBranches.isEmpty()) {
             cb.add(SKIP_CHILD)
             return
         }
         cb.beginControlFlow("when")
-        for ((brackets, child) in bodyBranches) {
-            val expr = predicateExpr(brackets, qkey, slots)
+        for (entry in bodyBranches) {
+            val expr = predicateExpr(entry.key, qkey, slots)
             cb.beginControlFlow("%L ->", expr)
-            emitChildBodyContent(cb, child, registry)
+            emitChildBodyContent(cb, entry.value, registry)
             cb.endControlFlow()
         }
         cb.add("else -> $SKIP_CHILD")
         cb.endControlFlow()
     }
 
-    private fun nodeHasBodyContent(node: TrieNode): Boolean =
-        node.textEntries.isNotEmpty() || node.nestedEntries.isNotEmpty() || node.children.isNotEmpty()
-
     private fun emitAttrEntries(cb: CodeBlock.Builder, node: TrieNode) {
-        for ((attrNs, attrName, f) in node.attrEntries) {
-            val nsLit: CodeBlock = if (attrNs == null) CodeBlock.of("null") else CodeBlock.of("%S", attrNs)
+        for (ae: AttrEntry in node.attrEntries()) {
+            val f = ae.field()
+            val nsLit: CodeBlock = if (ae.ns() == null) CodeBlock.of("null") else CodeBlock.of("%S", ae.ns())
             if (f.isList) {
-                cb.add("c.childAttr(%L, %S)?.let { __list_${f.name}.add(it) }\n", nsLit, attrName)
+                cb.add("c.childAttr(%L, %S)?.let { __list_${f.name()}.add(it) }\n", nsLit, ae.name())
             } else if (needsChildLoc(f)) {
                 cb.add(
-                    "c.childAttr(%L, %S)?.let { __raw_${f.name} = it; __loc_${f.name} = c.childLocation(); __set_${f.name} = true }\n",
-                    nsLit, attrName
+                    "c.childAttr(%L, %S)?.let { __raw_${f.name()} = it; __loc_${f.name()} = c.childLocation(); __set_${f.name()} = true }\n",
+                    nsLit, ae.name()
                 )
             } else {
                 cb.add(
-                    "c.childAttr(%L, %S)?.let { __raw_${f.name} = it; __set_${f.name} = true }\n",
-                    nsLit, attrName
+                    "c.childAttr(%L, %S)?.let { __raw_${f.name()} = it; __set_${f.name()} = true }\n",
+                    nsLit, ae.name()
                 )
             }
         }
     }
 
-    private fun emitChildBodyContent(cb: CodeBlock.Builder, node: TrieNode, registry: NestedTypeRegistry) {
-        val hasText = node.textEntries.isNotEmpty()
-        val hasNested = node.nestedEntries.isNotEmpty()
-        val hasDescend = node.children.isNotEmpty()
+    private fun emitChildBodyContent(
+        cb: CodeBlock.Builder,
+        node: TrieNode,
+        registry: CoreNestedRegistry,
+    ) {
+        val hasText = node.textEntries().isNotEmpty()
+        val hasNested = node.nestedEntries().isNotEmpty()
+        val hasDescend = node.children().isNotEmpty()
         when {
             hasNested -> {
-                for (f in node.nestedEntries) {
-                    val spec = registry.byFq.getValue(f.elemTypeFq)
-                    cb.add("val __n_${f.name}·=·${spec.helperName}(c)\n")
-                    if (f.isList) {
-                        cb.add("__list_${f.name}.add(__n_${f.name})\n")
-                    } else {
-                        cb.add("__nested_${f.name} = __n_${f.name}\n")
-                        cb.add("__set_${f.name} = true\n")
-                    }
+                for (f in node.nestedEntries()) {
+                    emitNestedHelperAssign(cb, f, f.elemTypeFq(), registry)
                 }
             }
             hasText -> {
-                val needLoc = node.textEntries.any { needsChildLoc(it) }
+                val textFields = node.textEntries()
+                val needLoc = textFields.any { needsChildLoc(it) }
                 if (needLoc) cb.add("val __t_loc·=·c.childLocation()\n")
                 cb.add("val __t = c.childText(false)\n")
-                for (f in node.textEntries) {
-                    if (f.isList) cb.add("__list_${f.name}.add(__t)\n")
+                for (f in textFields) {
+                    if (f.isList) cb.add("__list_${f.name()}.add(__t)\n")
                     else {
-                        cb.add("__raw_${f.name} = __t\n")
-                        if (needsChildLoc(f)) cb.add("__loc_${f.name} = __t_loc\n")
-                        cb.add("__set_${f.name} = true\n")
+                        cb.add("__raw_${f.name()} = __t\n")
+                        if (needsChildLoc(f)) cb.add("__loc_${f.name()} = __t_loc\n")
+                        cb.add("__set_${f.name()} = true\n")
                     }
                 }
             }
@@ -1269,8 +593,8 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
                 // Counter slots for direct edges under `node` must outlive the per-sibling lambda
                 // — declare them here, BEFORE entering forEachChild, so increments accumulate
                 // across siblings of the same parent.
-                val grouped = groupChildrenByQKey(node)
-                val slots = declareCounterSlots(cb, grouped)
+                val slots = node.allocateSlots()
+                declareSlotsCode(cb, slots)
                 cb.beginControlFlow("c.forEachChild·{ ln, ns ->\n")
                 emitChildrenSwitch(cb, node, slots, registry)
                 cb.endControlFlow()
@@ -1288,32 +612,32 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
      */
     private fun predicateExpr(
         brackets: List<PathPredicate>,
-        qkey: QKey,
-        slots: Map<PrefixKey, String>,
+        qkey: CoreQKey,
+        slots: SlotTable,
     ): CodeBlock {
         if (brackets.isEmpty()) return CodeBlock.of("true")
-        if (!bracketsHaveIndex(brackets)) {
+        if (!PredicateAnalysis.bracketsHaveIndex(brackets)) {
             val folded = brackets.reduce { a, b -> PathPredicate.And(a, b) }
             return plainPredicateExpr(folded)
         }
-        val firstIdxIndex = brackets.indexOfFirst { containsIndex(it) }
+        val firstIdxIndex = brackets.indexOfFirst { PredicateAnalysis.containsIndex(it) }
         // unreachable: bracketsHaveIndex returned true, so at least one bracket contains Index.
         require(firstIdxIndex >= 0) { "predicateExpr called with no Index in brackets — bug in bracketsHaveIndex" }
         val prefix = brackets.subList(0, firstIdxIndex)
         val firstIdxBracket = brackets[firstIdxIndex]
         val suffix = brackets.subList(firstIdxIndex + 1, brackets.size)
-        val n = firstIndexValue(firstIdxBracket)
-        val slotKey = PrefixKey(qkey, prefix)
-        val slotName = slots[slotKey]
-            // unreachable: declareCounterSlots populates every (qkey, prefix) pair we encounter.
-            ?: error("missing counter slot for $slotKey at qkey=$qkey — bug in counter detection")
+        val n = PredicateAnalysis.firstIndexValue(firstIdxBracket)
+        val slotKey = PrefixKey(qkey, PredicateAnalysis.prefixOfFirstIndex(brackets))
+        // SlotTable.get returns null when the key is absent. DispatchPlanBuilder allocates every
+        // (qkey, prefix) pair we encounter, so a null here signals a plan-builder bug.
+        val slotName: String = slots.get(slotKey)
         val parts = mutableListOf<CodeBlock>()
         // When the prefix is empty there is no __pre_ variable — the counter is always incremented.
         if (prefix.isNotEmpty()) parts += CodeBlock.of("__pre_%L", slotName)
         parts += CodeBlock.of("(__pos_%L == %L)", slotName, n)
         // If the first-index bracket also contains non-Index predicates (e.g. `[2 and @x='y']`),
         // emit those alongside the position check.
-        val residual = stripIndex(firstIdxBracket)
+        val residual = PredicateAnalysis.stripIndex(firstIdxBracket)
         if (residual != null) parts += plainPredicateExpr(residual)
         // Suffix: every bracket after the one that introduced the Index. These are evaluated as
         // ordinary attribute predicates against the current element — they refine the position
@@ -1339,110 +663,81 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         }
         is PathPredicate.And -> CodeBlock.of("(%L && %L)", plainPredicateExpr(p.l), plainPredicateExpr(p.r))
         is PathPredicate.Or -> CodeBlock.of("(%L || %L)", plainPredicateExpr(p.l), plainPredicateExpr(p.r))
-        // unreachable: caller routes Index-bearing brackets through predicateExpr; stripIndex removes Index nodes from And residuals before recursion.
+        // unreachable: caller routes Index-bearing brackets through predicateExpr; PredicateAnalysis.stripIndex removes Index nodes from And residuals before recursion.
         is PathPredicate.Index -> error("plainPredicateExpr called on Index — counter logic should have stripped this")
     }
 
-    private fun containsIndex(p: PathPredicate): Boolean = when (p) {
-        is PathPredicate.Index -> true
-        is PathPredicate.AttrEq -> false
-        is PathPredicate.And -> containsIndex(p.l) || containsIndex(p.r)
-        is PathPredicate.Or -> containsIndex(p.l) || containsIndex(p.r)
-    }
-
-    private fun bracketsHaveIndex(brackets: List<PathPredicate>): Boolean =
-        brackets.any { containsIndex(it) }
-
-    private fun prefixOfFirstIndex(brackets: List<PathPredicate>): List<PathPredicate> =
-        brackets.takeWhile { !containsIndex(it) }
-
-    /**
-     * Walks [p] left-to-right and returns the first Index value encountered. The grammar permits
-     * `[2 and @x='y']` which yields `And(Index(2), AttrEq(...))` — Index can appear anywhere.
-     */
-    private fun firstIndexValue(p: PathPredicate): Int = when (p) {
-        is PathPredicate.Index -> p.n
-        is PathPredicate.And -> if (containsIndex(p.l)) firstIndexValue(p.l) else firstIndexValue(p.r)
-        // unreachable: validateChildPredicate rejects Or that contains Index, so no Or reaches this point.
-        is PathPredicate.Or -> error("Index inside Or predicate is not supported (predicate=$p)")
-        // unreachable: invoked only on brackets where containsIndex returned true; the And arm walks toward the Index so a pure-AttrEq leaf is never the direct argument.
-        is PathPredicate.AttrEq -> error("firstIndexValue: predicate has no Index ($p)")
-    }
-
-    /**
-     * Returns [p] with all Index sub-predicates removed, or null if removal leaves nothing. Only
-     * defined for And-shaped composites — Or with an embedded Index is rejected upstream via
-     * [firstIndexValue].
-     */
-    private fun stripIndex(p: PathPredicate): PathPredicate? = when (p) {
-        is PathPredicate.Index -> null
-        is PathPredicate.AttrEq -> p
-        is PathPredicate.And -> {
-            val l = stripIndex(p.l)
-            val r = stripIndex(p.r)
-            when {
-                l == null -> r
-                r == null -> l
-                else -> PathPredicate.And(l, r)
-            }
+    /** Emits `val __cnt_<slot>: IntArray = intArrayOf(0)` for each precomputed slot. */
+    private fun declareSlotsCode(cb: CodeBlock.Builder, slots: SlotTable) {
+        for ((_, name) in slots) {
+            cb.add("val __cnt_%L: %T = intArrayOf(0)\n", name, INT_ARRAY)
         }
-        // unreachable: stripIndex is only called on Index-bearing brackets, and validateChildPredicate rejects Or that contains Index upstream.
-        is PathPredicate.Or -> error("Index inside Or predicate is not supported (predicate=$p)")
     }
 
-    private fun slotName(qkey: QKey, ordinal: Int): String {
-        val safe = qkey.local.replace(Regex("[^A-Za-z0-9_]"), "_")
-        return "${safe}_$ordinal"
-    }
-
-    data class PrefixKey(val qkey: QKey, val prefix: List<PathPredicate>)
-
+    /**
+     * Top-level child dispatch driven entirely by a pre-built [DispatchPlan]. The emitter does
+     * not insert into tries, group by QKey, or allocate slots — every routing decision was
+     * resolved by [DispatchPlanBuilder].
+     */
     private fun emitTopLevelChildSwitch(
         cb: CodeBlock.Builder,
-        directRoot: TrieNode,
-        slots: Map<PrefixKey, String>,
-        descendantFields: List<FieldSpec>,
-        mapFields: List<FieldSpec>,
-        polyFields: List<FieldSpec>,
-        registry: NestedTypeRegistry,
+        plan: DispatchPlan,
+        registry: CoreNestedRegistry,
         convVarFor: Map<String, String>,
     ) {
-        if (directRoot.children.isEmpty() && descendantFields.isEmpty() && mapFields.isEmpty() && polyFields.isEmpty()) {
+        emitChildSwitchCore(
+            cb,
+            plan.directRoot(),
+            plan.slots(),
+            plan.descendantByHead(),
+            plan.tailTries(),
+            plan.mapPlans(),
+            plan.polyFields(),
+            registry, convVarFor,
+        )
+    }
+
+    /**
+     * Core child-dispatch switch. Used both by record/nested-record bodies (via the full
+     * [DispatchPlan]) and by `@XmlMap` entries (which only carry direct-child + descendant data —
+     * no map-of-map or polymorphic dispatch).
+     */
+    private fun emitChildSwitchCore(
+        cb: CodeBlock.Builder,
+        directRoot: TrieNode,
+        slots: SlotTable,
+        byHead: Map<CoreQKey, List<DescendantBranch>>,
+        tailTries: Map<CoreQKey, TailTrie>,
+        mapPlans: Map<CoreFieldSpec, MapPlan>,
+        polyFields: List<CoreFieldSpec>,
+        registry: CoreNestedRegistry,
+        convVarFor: Map<String, String>,
+    ) {
+        if (directRoot.children().isEmpty() && byHead.isEmpty() && mapPlans.isEmpty() && polyFields.isEmpty()) {
             cb.add(SKIP_CHILD)
             return
         }
-        val byHead = LinkedHashMap<QKey, MutableList<Pair<List<PathPredicate>, FieldSpec>>>()
-        for (f in descendantFields) {
-            val seg = (f.source as Source.Child).segments[0] as PathSeg.Element
-            byHead.getOrPut(QKey(seg.ns, seg.name)) { mutableListOf() }.add(seg.brackets to f)
-        }
-        val groupedDirect = groupChildrenByQKey(directRoot)
         cb.beginControlFlow("when(ln)")
-        for ((qk, branches) in groupedDirect) {
-            val cond = qnameCond(qk.ns, qk.local)
+        emitGroupedChildArms(cb, directRoot.groupChildrenByQKey(), slots, registry)
+        for ((mf, mp) in mapPlans) {
+            val src = mf.source() as CoreSource.MapEntry
+            val cond = qnameCond(src.entryNs(), src.entryLocal())
             cb.beginControlFlow("%L ->", cond)
-            emitPredicateBranches(cb, qk, branches, slots, registry)
-            cb.endControlFlow()
-        }
-        for (mf in mapFields) {
-            val src = mf.source as Source.MapEntry
-            val cond = qnameCond(src.entryNs, src.entryLocal)
-            cb.beginControlFlow("%L ->", cond)
-            emitMapEntryCase(cb, mf, registry, convVarFor)
+            emitMapEntryCase(cb, mf, mp, registry, convVarFor)
             cb.endControlFlow()
         }
         for (pf in polyFields) {
-            when (val d = (pf.source as Source.PolyChild).dispatch) {
-                is PolyDispatch.Tag -> {
-                    for (v in d.variants) {
-                        val cond = qnameCond(v.ns, v.local)
+            when (val d = (pf.source() as CoreSource.PolyChild).dispatch()) {
+                is CorePolyDispatch.Tag -> {
+                    for (v in d.variants()) {
+                        val cond = qnameCond(v.ns(), v.local())
                         cb.beginControlFlow("%L ->", cond)
-                        emitPolyAssign(cb, pf, v.subtypeFq, registry)
+                        emitPolyAssign(cb, pf, v.subtypeFq(), registry)
                         cb.endControlFlow()
                     }
                 }
-                is PolyDispatch.Attr -> {
-                    val cond = qnameCond(d.wrapNs, d.wrapLocal)
+                is CorePolyDispatch.Attr -> {
+                    val cond = qnameCond(d.wrapNs(), d.wrapLocal())
                     cb.beginControlFlow("%L ->", cond)
                     emitPolyAttrSwitch(cb, pf, d, registry)
                     cb.endControlFlow()
@@ -1450,9 +745,9 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             }
         }
         for ((head, branches) in byHead) {
-            val cond = qnameCond(head.ns, head.local)
+            val cond = qnameCond(head.ns(), head.local())
             cb.beginControlFlow("%L ->", cond)
-            emitDescendantArm(cb, head, branches, registry, terminating = false)
+            emitDescendantArm(cb, head, branches, tailTries, registry, terminating = false)
             cb.endControlFlow()
         }
         if (byHead.isEmpty()) {
@@ -1462,9 +757,9 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
             cb.beginControlFlow("c.forEachDescendantInChild·{ dln, dns ->\n")
             cb.beginControlFlow("when(dln)")
             for ((head, branches) in byHead) {
-                val cond = qnameCond(head.ns, head.local, nsVar = "dns")
+                val cond = qnameCond(head.ns(), head.local(), nsVar = "dns")
                 cb.beginControlFlow("%L ->", cond)
-                emitDescendantArm(cb, head, branches, registry, terminating = true)
+                emitDescendantArm(cb, head, branches, tailTries, registry, terminating = true)
                 cb.endControlFlow()
             }
             cb.add("else -> false\n")
@@ -1475,33 +770,57 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         cb.endControlFlow()
     }
 
+    /**
+     * Map-entry child dispatch: pure plan walker over the pre-built [MapPlan]. MapPlan has no
+     * map-of-map or polymorphic children.
+     */
+    private fun emitMapEntrySwitch(
+        cb: CodeBlock.Builder,
+        mp: MapPlan,
+        registry: CoreNestedRegistry,
+        convVarFor: Map<String, String>,
+    ) {
+        emitChildSwitchCore(
+            cb,
+            mp.directRoot(),
+            mp.slots(),
+            mp.descendantByHead(),
+            mp.tailTries(),
+            emptyMap(),
+            emptyList(),
+            registry, convVarFor,
+        )
+    }
+
     private fun emitDescendantArm(
         cb: CodeBlock.Builder,
-        head: QKey,
-        branches: List<Pair<List<PathPredicate>, FieldSpec>>,
-        registry: NestedTypeRegistry,
+        head: CoreQKey,
+        branches: List<DescendantBranch>,
+        tailTries: Map<CoreQKey, TailTrie>,
+        registry: CoreNestedRegistry,
         terminating: Boolean,
     ) {
         // The descendant-axis head segment cannot carry a positional predicate (rejected by
         // validateChildPredicate), so brackets here are guaranteed Index-free. We can still have
         // attribute-equality predicates that select among descendant heads.
-        val unguarded = branches.filter { it.first.isEmpty() }.map { it.second }
-        val guarded = branches.filter { it.first.isNotEmpty() }
+        val unguarded = branches.filter { it.brackets().isEmpty() }.map { it.field() }
+        val guarded = branches.filter { it.brackets().isNotEmpty() }
+        val tail = tailTries[head]
         if (guarded.isEmpty()) {
-            emitDescendantArmBody(cb, head, unguarded, registry)
+            emitDescendantArmBody(cb, head, unguarded, tail, registry)
             if (terminating) cb.add("true\n")
             return
         }
         cb.beginControlFlow("when")
-        for ((brackets, f) in guarded) {
-            cb.beginControlFlow("%L ->", predicateExpr(brackets, head, emptyMap()))
-            emitDescendantArmBody(cb, head, listOf(f), registry)
+        for (b in guarded) {
+            cb.beginControlFlow("%L ->", predicateExpr(b.brackets(), head, SlotTable()))
+            emitDescendantArmBody(cb, head, listOf(b.field()), tail, registry)
             if (terminating) cb.add("true\n")
             cb.endControlFlow()
         }
         if (unguarded.isNotEmpty()) {
             cb.beginControlFlow("else ->")
-            emitDescendantArmBody(cb, head, unguarded, registry)
+            emitDescendantArmBody(cb, head, unguarded, tail, registry)
             if (terminating) cb.add("true\n")
             cb.endControlFlow()
         } else {
@@ -1513,27 +832,29 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
 
     private fun emitDescendantArmBody(
         cb: CodeBlock.Builder,
-        head: QKey,
-        headFields: List<FieldSpec>,
-        registry: NestedTypeRegistry,
+        head: CoreQKey,
+        headFields: List<CoreFieldSpec>,
+        tail: TailTrie?,
+        registry: CoreNestedRegistry,
     ) {
-        val emptyTail = headFields.filter { (it.source as Source.Child).segments.size == 1 }
-        val nonEmptyTail = headFields.filter { (it.source as Source.Child).segments.size > 1 }
-        vRequire(!(emptyTail.isNotEmpty() && nonEmptyTail.isNotEmpty())) {
-            "cannot mix '//${head.local}' with '//${head.local}/...' on the same head element"
+        val anyEmpty = headFields.any {
+            (it.source() as CoreSource.Child).segments().size == 1
         }
-        if (emptyTail.isNotEmpty()) {
-            vRequire(emptyTail.size == 1) {
-                "multiple descendant fields targeting '//${head.local}' (single-segment); at most one allowed"
+        val anyNonEmpty = headFields.any {
+            (it.source() as CoreSource.Child).segments().size > 1
+        }
+        vRequire(!(anyEmpty && anyNonEmpty)) {
+            "cannot mix '//${head.local()}' with '//${head.local()}/...' on the same head element"
+        }
+        if (anyEmpty) {
+            vRequire(headFields.size == 1) {
+                "multiple descendant fields targeting '//${head.local()}' (single-segment); at most one allowed"
             }
-            emitLeafReadInline(cb, emptyTail[0], registry)
+            emitLeafReadInline(cb, headFields[0], registry)
         } else {
-            val tailTrie = TrieNode()
-            for (f in nonEmptyTail) {
-                val tail = (f.source as Source.Child).segments.drop(1)
-                insertIntoTrie(tailTrie, tail, f)
-            }
-            emitChildBody(cb, tailTrie, registry)
+            val tailTrie = tail
+                ?: error("missing tail trie for descendant head $head — bug in DispatchPlanBuilder")
+            emitChildBody(cb, tailTrie.trie(), registry)
         }
     }
 
@@ -1541,30 +862,20 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         if (ns == null) CodeBlock.of("%S if ($nsVar == null || c.ignoreNamespace)", local)
         else CodeBlock.of("%S if ($nsVar == %S || c.ignoreNamespace)", local, ns)
 
-    private fun emitLeafReadInline(cb: CodeBlock.Builder, f: FieldSpec, registry: NestedTypeRegistry) {
-        when (f.coerce) {
-            is Coerce.Nested -> {
-                // ensureNested registers every nested data-class type before emit; lookup is total.
-                val spec = registry.byFq.getValue(f.elemTypeFq)
-                cb.add("val __n_${f.name}·=·${spec.helperName}(c)\n")
-                if (f.isList) {
-                    cb.add("__list_${f.name}.add(__n_${f.name})\n")
-                } else {
-                    cb.add("__nested_${f.name} = __n_${f.name}\n")
-                    cb.add("__set_${f.name} = true\n")
-                }
-            }
+    private fun emitLeafReadInline(cb: CodeBlock.Builder, f: CoreFieldSpec, registry: CoreNestedRegistry) {
+        when (f.coerce()) {
+            is CoreCoerce.Nested -> emitNestedHelperAssign(cb, f, f.elemTypeFq(), registry)
 
             else -> {
                 val needLoc = needsChildLoc(f)
                 if (needLoc) cb.add("val __t_loc·=·c.childLocation()\n")
                 cb.add("val __t = c.childText(false)\n")
                 if (f.isList) {
-                    cb.add("__list_${f.name}.add(__t)\n")
+                    cb.add("__list_${f.name()}.add(__t)\n")
                 } else {
-                    cb.add("__raw_${f.name} = __t\n")
-                    if (needLoc) cb.add("__loc_${f.name} = __t_loc\n")
-                    cb.add("__set_${f.name} = true\n")
+                    cb.add("__raw_${f.name()} = __t\n")
+                    if (needLoc) cb.add("__loc_${f.name()} = __t_loc\n")
+                    cb.add("__set_${f.name()} = true\n")
                 }
             }
         }
@@ -1572,95 +883,117 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
 
     private fun emitPolyAssign(
         cb: CodeBlock.Builder,
-        f: FieldSpec,
+        f: CoreFieldSpec,
         subtypeFq: String,
-        registry: NestedTypeRegistry,
+        registry: CoreNestedRegistry,
     ) {
         // buildPolyChild calls ensureNested(sub) for every subtype, so the registry has every spec.
-        val spec = registry.byFq.getValue(subtypeFq)
-        cb.add("val __n_${f.name}·=·${spec.helperName}(c)\n")
+        emitNestedHelperAssign(cb, f, subtypeFq, registry)
+    }
+
+    /** Call the registry helper for [helperFq] and bind the result into the field's slot. */
+    private fun emitNestedHelperAssign(
+        cb: CodeBlock.Builder,
+        f: CoreFieldSpec,
+        helperFq: String,
+        registry: CoreNestedRegistry,
+    ) {
+        val helper = registry.helperName(helperFq)
+        cb.add("val __n_${f.name()}·=·${helper}(c)\n")
         if (f.isList) {
-            cb.add("__list_${f.name}.add(__n_${f.name})\n")
+            cb.add("__list_${f.name()}.add(__n_${f.name()})\n")
         } else {
-            cb.add("__nested_${f.name} = __n_${f.name}\n")
-            cb.add("__set_${f.name} = true\n")
+            cb.add("__nested_${f.name()} = __n_${f.name()}\n")
+            cb.add("__set_${f.name()} = true\n")
         }
     }
 
     private fun emitPolyAttrSwitch(
         cb: CodeBlock.Builder,
-        f: FieldSpec,
-        d: PolyDispatch.Attr,
-        registry: NestedTypeRegistry,
+        f: CoreFieldSpec,
+        d: CorePolyDispatch.Attr,
+        registry: CoreNestedRegistry,
     ) {
-        val nsLit: CodeBlock = if (d.attrNs == null) CodeBlock.of("null") else CodeBlock.of("%S", d.attrNs)
-        cb.add("val __disc_${f.name}: %T = c.childAttr(%L, %S)\n", STRING_NULLABLE, nsLit, d.attrLocal)
-        cb.beginControlFlow("when (__disc_${f.name})")
-        for (v in d.variants) {
-            cb.beginControlFlow("%S ->", v.value)
-            emitPolyAssign(cb, f, v.subtypeFq, registry)
+        val nsLit: CodeBlock = if (d.attrNs() == null) CodeBlock.of("null") else CodeBlock.of("%S", d.attrNs())
+        cb.add("val __disc_${f.name()}: %T = c.childAttr(%L, %S)\n", STRING_NULLABLE, nsLit, d.attrLocal())
+        cb.beginControlFlow("when (__disc_${f.name()})")
+        for (v in d.variants()) {
+            cb.beginControlFlow("%S ->", v.value())
+            emitPolyAssign(cb, f, v.subtypeFq(), registry)
             cb.endControlFlow()
         }
         cb.add(ELSE_SKIP_CHILD)
         cb.endControlFlow()
     }
 
-    private fun emitChildBody(cb: CodeBlock.Builder, node: TrieNode, registry: NestedTypeRegistry) {
+    private fun emitChildBody(
+        cb: CodeBlock.Builder,
+        node: TrieNode,
+        registry: CoreNestedRegistry,
+    ) {
         emitAttrEntries(cb, node)
         emitChildBodyContent(cb, node, registry)
     }
 
-    private fun coerceField(f: FieldSpec, convVarFor: Map<String, String>): CodeBlock {
+    private fun coerceField(f: CoreFieldSpec, convVarFor: Map<String, String>): CodeBlock {
         val cb = CodeBlock.builder()
-        cb.add("val __final_${f.name}: %T = ", f.typeName)
+        cb.add("val __final_${f.name()}: %T = ", fieldTypeName(f))
 
-        if (f.coerce is Coerce.MapAggregate) {
-            if (f.nullable) cb.add("if (!__set_${f.name}) null else __map_${f.name}\n")
-            else cb.add("__map_${f.name}\n")
+        val nullable = fieldNullable(f)
+
+        if (f.coerce() is CoreCoerce.MapAggregate) {
+            if (nullable) cb.add("if (!__set_${f.name()}) null else __map_${f.name()}\n")
+            else cb.add("__map_${f.name()}\n")
             return cb.build()
         }
 
-        if (f.coerce is Coerce.Nested) {
+        if (f.coerce() is CoreCoerce.Nested) {
             if (f.isList) {
-                cb.add("__list_${f.name}\n")
+                cb.add("__list_${f.name()}\n")
             } else {
-                val nameLit = CodeBlock.of("%S", f.name)
+                val nameLit = CodeBlock.of("%S", f.name())
                 val missingThrow = CodeBlock.of("throw %T(%L, __loc)", MISSING_EX, nameLit)
-                if (f.nullable) {
-                    cb.add("if (!__set_${f.name}) null else __nested_${f.name}\n")
+                if (nullable) {
+                    cb.add("if (!__set_${f.name()}) null else __nested_${f.name()}\n")
                 } else {
-                    cb.add("if (!__set_${f.name}) %L else __nested_${f.name}!!\n", missingThrow)
+                    cb.add("if (!__set_${f.name()}) %L else __nested_${f.name()}!!\n", missingThrow)
                 }
             }
             return cb.build()
         }
 
         if (f.isList) {
-            cb.add("__list_${f.name}.map { __r -> ")
+            cb.add("__list_${f.name()}.map { __r -> ")
             cb.add(coerceRaw(f, CodeBlock.of("__r"), convVarFor))
             cb.add(" }\n")
             return cb.build()
         }
 
-        val rawVar = CodeBlock.of("__raw_${f.name}")
-        val nameLit = CodeBlock.of("%S", f.name)
+        val rawVar = CodeBlock.of("__raw_${f.name()}")
+        val nameLit = CodeBlock.of("%S", f.name())
         val missingThrow = CodeBlock.of("throw %T(%L, __loc)", MISSING_EX, nameLit)
         val orMissing = CodeBlock.of("(%L ?: %L)", rawVar, missingThrow)
         val orEmpty = CodeBlock.of("(%L ?: \"\")", rawVar)
 
         // Source.MapEntry filtered above via Coerce.MapAggregate; Source.PolyChild filtered via
         // Coerce.Nested. Remaining sources: Attr, Text, Child.
-        when (f.source) {
-            is Source.Attr -> {
-                if (f.nullable) {
-                    cb.add("if (%L == null) null else ", rawVar)
-                    cb.add(coerceRaw(f, rawVar, convVarFor))
+        when (f.source()) {
+            is CoreSource.Attr -> {
+                if (nullable) {
+                    // For AsString the if/else collapses to a no-op pass-through (`raw ?: raw`);
+                    // emit the raw nullable directly so kotlinc doesn't warn IfThenToSafeAccess.
+                    if (f.coerce() is CoreCoerce.AsString) {
+                        cb.add(rawVar)
+                    } else {
+                        cb.add("if (%L == null) null else ", rawVar)
+                        cb.add(coerceRaw(f, rawVar, convVarFor))
+                    }
                 } else {
                     cb.add(coerceRaw(f, orMissing, convVarFor))
                 }
             }
 
-            is Source.Text -> {
+            is CoreSource.Text -> {
                 // __raw_X is declared as non-null String at the recordText/subrecordText call,
                 // and that call runs unconditionally for any record carrying an @XmlText field.
                 // No __set_X gate needed: nullable @XmlText still binds whatever the cursor
@@ -1668,15 +1001,15 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
                 cb.add(coerceRaw(f, rawVar, convVarFor))
             }
 
-            is Source.Child -> {
+            is CoreSource.Child -> {
                 val effLoc =
-                    if (needsChildLoc(f)) CodeBlock.of("(__loc_${f.name} ?: __loc)")
+                    if (needsChildLoc(f)) CodeBlock.of("(__loc_${f.name()} ?: __loc)")
                     else CodeBlock.of("__loc")
-                if (f.nullable) {
-                    cb.add("if (!__set_${f.name}) null else ")
+                if (nullable) {
+                    cb.add("if (!__set_${f.name()}) null else ")
                     cb.add(coerceRaw(f, orEmpty, convVarFor, effLoc))
                 } else {
-                    cb.add("if (!__set_${f.name}) %L else ", missingThrow)
+                    cb.add("if (!__set_${f.name()}) %L else ", missingThrow)
                     cb.add(coerceRaw(f, orEmpty, convVarFor, effLoc))
                 }
             }
@@ -1688,31 +1021,35 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
     }
 
     private fun coerceRaw(
-        f: FieldSpec,
+        f: CoreFieldSpec,
         raw: CodeBlock,
         convVarFor: Map<String, String>,
         lcExpr: CodeBlock = CodeBlock.of("__loc"),
     ): CodeBlock {
-        val nl = CodeBlock.of("%S", f.name)
+        val nl = CodeBlock.of("%S", f.name())
         // Coerce.MapAggregate and Coerce.Nested are filtered upstream in coerceField; reaching
         // them here is impossible, so they're not enumerated in this when.
-        return when (val coerce = f.coerce) {
-            Coerce.AsString -> raw
-            is Coerce.Scalar -> CodeBlock.of("%M(%L, %L, %L)", scalarMember(coerce.kind), nl, raw, lcExpr)
-            is Coerce.Temporal -> {
-                val m = when (coerce.kind) {
-                    TemporalKind.LOCAL_DATE -> COERCE_LOCAL_DATE
-                    TemporalKind.LOCAL_DATE_TIME -> COERCE_LOCAL_DATE_TIME
-                    TemporalKind.INSTANT -> COERCE_INSTANT
+        return when (val coerce = f.coerce()) {
+            is CoreCoerce.AsString -> raw
+            is CoreCoerce.Scalar -> CodeBlock.of("%M(%L, %L, %L)", scalarMember(coerce.kind()), nl, raw, lcExpr)
+            is CoreCoerce.Temporal -> {
+                val m = when (coerce.kind()) {
+                    CoreScalarKind.LOCAL_DATE -> COERCE_LOCAL_DATE
+                    CoreScalarKind.LOCAL_DATE_TIME -> COERCE_LOCAL_DATE_TIME
+                    CoreScalarKind.INSTANT -> COERCE_INSTANT
+                    else -> error("non-temporal ScalarKind in Coerce.Temporal: ${coerce.kind()}")
                 }
-                CodeBlock.of("%M(%L, %L, %S, %L)", m, nl, raw, coerce.pattern, lcExpr)
+                CodeBlock.of("%M(%L, %L, %S, %L)", m, nl, raw, coerce.pattern() ?: "", lcExpr)
             }
 
-            is Coerce.Decimal -> CodeBlock.of("%M(%L, %L, %S, %L)", COERCE_BIG_DECIMAL, nl, raw, coerce.pattern, lcExpr)
-            is Coerce.Custom -> {
+            is CoreCoerce.Decimal -> CodeBlock.of(
+                "%M(%L, %L, %S, %L)", COERCE_BIG_DECIMAL, nl, raw, coerce.pattern() ?: "", lcExpr,
+            )
+            is CoreCoerce.Custom -> {
                 // registerConverter pre-populates convVarFor for every Coerce.Custom field; lookup
                 // is total here.
-                val varName = convVarFor.getValue(coerce.cls.canonicalName)
+                val cls = TypeRefs.toClassName(coerce.converterClass())
+                val varName = convVarFor.getValue(cls.canonicalName)
                 CodeBlock.of("$varName.convert(%L, %L)", raw, lcExpr)
             }
 
@@ -1720,122 +1057,24 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         }
     }
 
-    private fun scalarMember(kind: ScalarKind): MemberName = when (kind) {
-        ScalarKind.INT -> COERCE_INT
-        ScalarKind.LONG -> COERCE_LONG
-        ScalarKind.DOUBLE -> COERCE_DOUBLE
-        ScalarKind.BOOLEAN -> COERCE_BOOLEAN
-    }
-
-    private fun annotationOf(cls: KSClassDeclaration, fqcn: String): KSAnnotation? =
-        cls.annotations.firstOrNull { fq(it) == fqcn }
-
-    private fun fq(a: KSAnnotation): String? =
-        a.annotationType.resolve().declaration.qualifiedName?.asString()
-
-    private fun stringArg(a: KSAnnotation, name: String): String? =
-        a.arguments.firstOrNull { it.name?.asString() == name }?.value as? String
-
-    enum class ScalarKind { INT, LONG, DOUBLE, BOOLEAN }
-    enum class TemporalKind { LOCAL_DATE, LOCAL_DATE_TIME, INSTANT }
-    enum class Ctx { RECORD, SUBRECORD }
-
-    sealed class PathSeg {
-        data class Element(
-            val ns: String?,
-            val name: String,
-            val brackets: List<PathPredicate> = emptyList(),
-        ) : PathSeg()
-        data class AttrLeaf(val ns: String?, val name: String) : PathSeg()
-    }
-
-    sealed class Source {
-        data class Attr(val ns: String?, val name: String) : Source()
-        data class Text(val preserveWhitespace: Boolean) : Source()
-        data class Child(val segments: List<PathSeg>, val descendant: Boolean) : Source()
-        data class MapEntry(val entryNs: String?, val entryLocal: String) : Source()
-        data class PolyChild(val dispatch: PolyDispatch) : Source()
-    }
-
-    sealed class PolyDispatch {
-        data class Tag(val variants: List<TagVariant>) : PolyDispatch()
-        data class Attr(
-            val wrapNs: String?,
-            val wrapLocal: String,
-            val attrNs: String?,
-            val attrLocal: String,
-            val variants: List<AttrVariant>,
-        ) : PolyDispatch()
-    }
-
-    data class TagVariant(val ns: String?, val local: String, val subtypeFq: String)
-    data class AttrVariant(val value: String, val subtypeFq: String)
-
-    sealed class Coerce {
-        data object AsString : Coerce()
-        data class Scalar(val kind: ScalarKind) : Coerce()
-        data class Temporal(val kind: TemporalKind, val pattern: String) : Coerce()
-        data class Decimal(val pattern: String) : Coerce()
-        data class Custom(val cls: ClassName, val fq: String) : Coerce()
-        data class Nested(val typeFq: String) : Coerce()
-        data object MapAggregate : Coerce()
-    }
-
-    data class FieldSpec(
-        val name: String,
-        val typeName: TypeName,
-        val nullable: Boolean,
-        val isList: Boolean,
-        val elemNullable: Boolean,
-        val elemTypeName: TypeName,
-        val elemTypeFq: String,
-        val source: Source,
-        val coerce: Coerce,
-        val mapKeyField: FieldSpec? = null,
-        val mapValueField: FieldSpec? = null,
-    )
-
-    data class QKey(val ns: String?, val local: String)
-
-    data class EdgeKey(val qkey: QKey, val brackets: List<PathPredicate>)
-
-    class TrieNode {
-        val children: MutableMap<EdgeKey, TrieNode> = LinkedHashMap()
-        val attrEntries: MutableList<Triple<String?, String, FieldSpec>> = mutableListOf()
-        val textEntries: MutableList<FieldSpec> = mutableListOf()
-        val nestedEntries: MutableList<FieldSpec> = mutableListOf()
-    }
-
-    data class NestedTypeSpec(
-        val cls: KSClassDeclaration,
-        val typeName: ClassName,
-        val helperName: String,
-        val nsMap: Map<String, String>,
-        val fields: List<FieldSpec>,
-    )
-
-    class NestedTypeRegistry {
-        val byFq: MutableMap<String, NestedTypeSpec> = LinkedHashMap()
-        val inProgress: MutableSet<String> = LinkedHashSet()
+    /**
+     * Map a neutral [CoreScalarKind] back to the runtime coercion member function. Mirrors the
+     * APT side. Core's [CoreScalarKind.STRING] is unreachable through [CoreCoerce.Scalar] because
+     * CoreClassifier routes string coercion through [CoreCoerce.AsString]; same for BIG_DECIMAL
+     * (routed through [CoreCoerce.Decimal]) and the temporal kinds (routed through
+     * [CoreCoerce.Temporal]). The else branch therefore signals a classifier bug rather than a
+     * missing mapping.
+     */
+    private fun scalarMember(kind: CoreScalarKind): MemberName = when (kind) {
+        CoreScalarKind.INT -> COERCE_INT
+        CoreScalarKind.LONG -> COERCE_LONG
+        CoreScalarKind.DOUBLE -> COERCE_DOUBLE
+        CoreScalarKind.BOOLEAN -> COERCE_BOOLEAN
+        else -> error("Coerce.Scalar carries non-numeric ScalarKind $kind; CoreClassifier should route this through Decimal/Temporal/AsString")
     }
 
     private companion object {
         const val XML_RECORD_FQ = "xmlfluss.XmlRecord"
-        const val XML_NS_FQ = "xmlfluss.XmlNs"
-        const val XML_ATTR_FQ = "xmlfluss.XmlAttr"
-        const val XML_CHILD_FQ = "xmlfluss.XmlChild"
-        const val XML_TEXT_FQ = "xmlfluss.XmlText"
-        const val XML_FORMAT_FQ = "xmlfluss.XmlFormat"
-        const val XML_CONVERTER_FQ = "xmlfluss.XmlConverter"
-        const val XML_MAP_FQ = "xmlfluss.XmlMap"
-        const val XML_POLYMORPHIC_FQ = "xmlfluss.XmlPolymorphic"
-        const val XML_SUBTYPE_FQ = "xmlfluss.XmlSubtype"
-
-        val SCALAR_TEMPORAL_FQS: Set<String> = setOf(
-            KOTLIN_STRING, KOTLIN_INT, KOTLIN_LONG, KOTLIN_DOUBLE, KOTLIN_BOOLEAN,
-            "java.time.LocalDate", "java.time.LocalDateTime", "java.time.Instant",
-            "java.math.BigDecimal",
-        )
 
         val FLOW = ClassName("kotlinx.coroutines.flow", "Flow")
         val FLOW_BUILDER = MemberName("kotlinx.coroutines.flow", "flow")
@@ -1845,6 +1084,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         val PATHS_COMPILE = MemberName(ClassName(XMLFLUSS_RUNTIME, "Paths"), "compile")
         val MISSING_EX = ClassName("xmlfluss", "XmlParseException", "Missing")
         val MUTABLE_LIST = ClassName("kotlin.collections", "MutableList")
+        val MUTABLE_MAP = ClassName("kotlin.collections", "MutableMap")
         val LINKED_MAP_OF = MemberName("kotlin.collections", "linkedMapOf")
         val LOCATION = ClassName("xmlfluss", "Location")
         val LOCATION_NULLABLE = LOCATION.copy(nullable = true)

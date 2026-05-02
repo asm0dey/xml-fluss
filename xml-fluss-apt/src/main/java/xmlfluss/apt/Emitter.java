@@ -1,25 +1,53 @@
 package xmlfluss.apt;
 
-import com.palantir.javapoet.*;
+import com.palantir.javapoet.AnnotationSpec;
+import com.palantir.javapoet.ClassName;
+import com.palantir.javapoet.CodeBlock;
+import com.palantir.javapoet.JavaFile;
+import com.palantir.javapoet.MethodSpec;
+import com.palantir.javapoet.ParameterSpec;
+import com.palantir.javapoet.ParameterizedTypeName;
+import com.palantir.javapoet.TypeName;
+import com.palantir.javapoet.TypeSpec;
+import com.palantir.javapoet.WildcardTypeName;
+import xmlfluss.codegen.model.AttrVariant;
+import xmlfluss.codegen.model.Coerce;
+import xmlfluss.codegen.model.FieldSpec;
+import xmlfluss.codegen.model.NestedRegistry;
+import xmlfluss.codegen.model.PolyDispatch;
+import xmlfluss.codegen.model.QKey;
+import xmlfluss.codegen.model.RecordSpec;
+import xmlfluss.codegen.model.Source;
+import xmlfluss.codegen.model.TagVariant;
+import xmlfluss.codegen.plan.AttrEntry;
+import xmlfluss.codegen.plan.DescendantBranch;
+import xmlfluss.codegen.plan.DispatchPlan;
+import xmlfluss.codegen.plan.MapPlan;
+import xmlfluss.codegen.plan.PredicateAnalysis;
+import xmlfluss.codegen.plan.PrefixKey;
+import xmlfluss.codegen.plan.SlotTable;
+import xmlfluss.codegen.plan.TailTrie;
+import xmlfluss.codegen.plan.TrieNode;
 import xmlfluss.path.Predicate;
 
 import javax.annotation.processing.Generated;
 import javax.annotation.processing.ProcessingEnvironment;
 import javax.lang.model.element.Modifier;
+import javax.lang.model.element.TypeElement;
 import javax.tools.Diagnostic;
 import java.io.IOException;
 import java.io.InputStream;
 import java.time.LocalDate;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.function.Consumer;
 
 /**
  * Generates the Java source for a {@code ${ClassName}Parser}. Renders both the
- * top-level record and any nested records discovered by the {@link Classifier}.
+ * top-level record and any nested records discovered by the {@link xmlfluss.codegen.classify.CoreClassifier}.
  */
 final class Emitter {
 
@@ -50,8 +78,10 @@ final class Emitter {
         this.env = env;
     }
 
-    void emit(Model.RecordSpec topLevel, Model.NestedRegistry registry) {
-        ClassName recordType = ClassName.get(topLevel.element());
+    void emit(RecordSpec topLevel, DispatchPlan plan, NestedRegistry registry) {
+        TypeElement origin = Objects.requireNonNull((TypeElement) topLevel.originatingHandle(),
+                "originating TypeElement missing for " + topLevel.simpleName());
+        ClassName recordType = ClassName.get(origin);
         String parserName = topLevel.simpleName() + "Parser";
 
         TypeSpec.Builder cls = TypeSpec.classBuilder(parserName)
@@ -69,7 +99,7 @@ final class Emitter {
         // Static `Map<String,String> NS` initializer mirroring @XmlNs declarations on the record.
         cls.addField(buildNsField(topLevel.nsMap()));
 
-        cls.addField(FieldSpec.builder(CN_COMPILED_PATH, "PATH", Modifier.PRIVATE, Modifier.STATIC, Modifier.FINAL)
+        cls.addField(com.palantir.javapoet.FieldSpec.builder(CN_COMPILED_PATH, "PATH", Modifier.PRIVATE, Modifier.STATIC, Modifier.FINAL)
                 .initializer("$T.INSTANCE.compile($S, NS)",
                         CN_PATHS, topLevel.recordPath())
                 .build());
@@ -77,7 +107,7 @@ final class Emitter {
         // Walk every field (top-level + nested) and intern each unique @XmlConverter class as a static singleton field.
         Map<String, ConverterRef> converterRefs = collectConverters(topLevel, registry);
         for (ConverterRef ref : converterRefs.values()) {
-            cls.addField(FieldSpec.builder(ref.cls, ref.varName,
+            cls.addField(com.palantir.javapoet.FieldSpec.builder(ref.cls, ref.varName,
                             Modifier.PRIVATE, Modifier.STATIC, Modifier.FINAL)
                     .initializer("new $T()", ref.cls)
                     .build());
@@ -106,21 +136,27 @@ final class Emitter {
                 .addParameter(CN_CURSOR, "c")
                 .returns(recordType);
         // Generate per-field state, the forEachSubrecordChild dispatch over @XmlAttr/@XmlChild/@XmlText/@XmlMap, and the canonical-ctor invocation that returns the record instance.
-        buildOne.addCode(buildInstanceBody(recordType, topLevel.fields(), registry,
+        buildOne.addCode(buildInstanceBody(recordType, topLevel.fields(), plan, registry,
                 converterRefs, /*record=*/true));
         cls.addMethod(buildOne.build());
 
-        for (var entry : registry.byFq.entrySet()) {
+        for (var entry : registry.byFq().entrySet()) {
             String fq = entry.getKey();
-            Model.RecordSpec spec = entry.getValue();
-            String helper = registry.helperByFq.get(fq);
-            ClassName nestedType = ClassName.get(spec.element());
+            RecordSpec spec = entry.getValue();
+            String helper = registry.helperName(fq);
+            TypeElement nestedOrigin = Objects.requireNonNull((TypeElement) spec.originatingHandle(),
+                    "originating TypeElement missing for nested " + fq);
+            ClassName nestedType = ClassName.get(nestedOrigin);
+            DispatchPlan nestedPlan = plan.byFq().get(fq);
+            if (nestedPlan == null) {
+                throw new IllegalStateException("DispatchPlan missing for nested record " + fq);
+            }
             MethodSpec.Builder helperMethod = MethodSpec.methodBuilder(helper)
                     .addModifiers(Modifier.PRIVATE, Modifier.STATIC)
                     .addParameter(CN_CURSOR, "c")
                     .returns(nestedType);
             // Emit a private static helper for each nested record type — same field/dispatch shape as __buildRecord but reused from parent fields that descend into this nested type.
-            helperMethod.addCode(buildInstanceBody(nestedType, spec.fields(), registry,
+            helperMethod.addCode(buildInstanceBody(nestedType, spec.fields(), nestedPlan, registry,
                     converterRefs, /*record=*/false));
             cls.addMethod(helperMethod.build());
         }
@@ -134,15 +170,15 @@ final class Emitter {
         } catch (IOException ioe) {
             env.getMessager().printMessage(Diagnostic.Kind.ERROR,
                     "xml-fluss-apt: failed to write " + parserName + ": " + ioe.getMessage(),
-                    topLevel.element());
+                    origin);
         }
     }
 
-    private FieldSpec buildNsField(Map<String, String> nsMap) {
+    private com.palantir.javapoet.FieldSpec buildNsField(Map<String, String> nsMap) {
         TypeName mapType = ParameterizedTypeName.get(CN_MAP,
                 ClassName.get("java.lang", "String"),
                 ClassName.get("java.lang", "String"));
-        FieldSpec.Builder b = FieldSpec.builder(mapType, "NS",
+        com.palantir.javapoet.FieldSpec.Builder b = com.palantir.javapoet.FieldSpec.builder(mapType, "NS",
                 Modifier.PRIVATE, Modifier.STATIC, Modifier.FINAL);
         if (nsMap.isEmpty()) {
             b.initializer("$T.<$T,$T>emptyMap()", CN_COLLECTIONS,
@@ -172,21 +208,21 @@ final class Emitter {
 
     private record ConverterRef(ClassName cls, String varName) {}
 
-    private Map<String, ConverterRef> collectConverters(Model.RecordSpec topLevel,
-                                                        Model.NestedRegistry registry) {
+    private Map<String, ConverterRef> collectConverters(RecordSpec topLevel,
+                                                        NestedRegistry registry) {
         Map<String, ConverterRef> out = new LinkedHashMap<>();
-        for (Model.FieldSpec f : topLevel.fields()) registerConverter(out, f);
-        for (Model.RecordSpec n : registry.byFq.values()) {
-            for (Model.FieldSpec f : n.fields()) registerConverter(out, f);
+        for (FieldSpec f : topLevel.fields()) registerConverter(out, f);
+        for (RecordSpec n : registry.byFq().values()) {
+            for (FieldSpec f : n.fields()) registerConverter(out, f);
         }
         return out;
     }
 
-    private void registerConverter(Map<String, ConverterRef> sink, Model.FieldSpec f) {
-        if (f.coerce() instanceof Model.Coerce.Custom c) {
+    private void registerConverter(Map<String, ConverterRef> sink, FieldSpec f) {
+        if (f.coerce() instanceof Coerce.Custom c) {
             if (!sink.containsKey(c.converterFq())) {
                 String varName = "__conv_" + sink.size();
-                sink.put(c.converterFq(), new ConverterRef(c.converterClass(), varName));
+                sink.put(c.converterFq(), new ConverterRef(TypeRefs.toClassName(c.converterClass()), varName));
             }
         }
         if (f.mapKeyField() != null) registerConverter(sink, f.mapKeyField());
@@ -232,8 +268,9 @@ final class Emitter {
     }
 
     private CodeBlock buildInstanceBody(ClassName type,
-                                        List<Model.FieldSpec> fields,
-                                        Model.NestedRegistry registry,
+                                        List<FieldSpec> fields,
+                                        DispatchPlan plan,
+                                        NestedRegistry registry,
                                         Map<String, ConverterRef> converterRefs,
                                         boolean record) {
         String attrFn = record ? "recordAttr" : "childAttr";
@@ -245,56 +282,40 @@ final class Emitter {
         cb.addStatement("final $T __loc = c.$L()", CN_LOCATION, locFn);
 
         // Read attributes immediately.
-        for (Model.FieldSpec f : fields) {
-            if (!(f.source() instanceof Model.Source.Attr a)) continue;
+        for (FieldSpec f : fields) {
+            if (!(f.source() instanceof Source.Attr a)) continue;
             cb.addStatement("final $T __raw_$L = c.$L($L, $S)",
                     ClassName.get(String.class), f.name(), attrFn, nsLiteral(a.ns()), a.name());
         }
 
-        Model.FieldSpec textField = null;
+        FieldSpec textField = null;
         boolean hasChildOrText = false;
-        for (Model.FieldSpec f : fields) {
-            if (f.source() instanceof Model.Source.Text) {
+        for (FieldSpec f : fields) {
+            if (f.source() instanceof Source.Text) {
                 textField = f;
                 hasChildOrText = true;
                 continue;
             }
-            if (f.source() instanceof Model.Source.Child
-                    || f.source() instanceof Model.Source.PolyChild) {
+            if (f.source() instanceof Source.Child
+                    || f.source() instanceof Source.PolyChild) {
                 hasChildOrText = true;
                 emitFieldStateInit(cb, f);
-            } else if (f.source() instanceof Model.Source.MapEntry) {
+            } else if (f.source() instanceof Source.MapEntry) {
                 hasChildOrText = true;
                 emitMapStateInit(cb, f);
             }
         }
 
         if (hasChildOrText) {
-            // Build trie of direct children (non-descendant @XmlChild fields).
-            TrieNode root = new TrieNode();
-            List<Model.FieldSpec> descendantFields = new ArrayList<>();
-            List<Model.FieldSpec> mapFields = new ArrayList<>();
-            List<Model.FieldSpec> polyFields = new ArrayList<>();
-            for (Model.FieldSpec f : fields) {
-                if (f.source() instanceof Model.Source.Child sc) {
-                    if (sc.descendant()) descendantFields.add(f);
-                    else insertIntoTrie(root, sc.segments(), f);
-                } else if (f.source() instanceof Model.Source.MapEntry) {
-                    mapFields.add(f);
-                } else if (f.source() instanceof Model.Source.PolyChild) {
-                    polyFields.add(f);
-                }
-            }
-
             // Counter slots must be declared OUTSIDE the per-sibling lambda so that ++__cnt[0]
             // accumulates across siblings rather than resetting per iteration.
-            Map<PrefixKey, String> slots = declareCounterSlots(cb, groupChildrenByQKey(root));
+            declareSlotsCode(cb, plan.slots());
             cb.add("$T.$L(c, (ln, ns) -> {\n", CN_ADAPTER, forEachFn).indent();
-            emitTopLevelChildSwitch(cb, root, slots, descendantFields, mapFields, polyFields, registry, converterRefs, "ln", "ns");
+            emitTopLevelChildSwitch(cb, plan, registry, converterRefs);
             cb.unindent().add("});\n");
 
             if (textField != null) {
-                boolean preserve = ((Model.Source.Text) textField.source()).preserveWhitespace();
+                boolean preserve = ((Source.Text) textField.source()).preserveWhitespace();
                 cb.addStatement("final $T __raw_$L = c.$L($L)",
                         ClassName.get(String.class), textField.name(), textFn, preserve);
             }
@@ -302,7 +323,7 @@ final class Emitter {
 
         // Coerce per field, build constructor args.
         List<String> ctorArgs = new ArrayList<>();
-        for (Model.FieldSpec f : fields) {
+        for (FieldSpec f : fields) {
             ctorArgs.add("__final_" + f.name());
             cb.add(coerceField(f, converterRefs));
         }
@@ -317,15 +338,16 @@ final class Emitter {
     }
 
     /** Emit per-field state holders. */
-    private void emitFieldStateInit(CodeBlock.Builder cb, Model.FieldSpec f) {
-        if (f.source() instanceof Model.Source.Text) return;
-        if (f.coerce() instanceof Model.Coerce.Nested) {
+    private void emitFieldStateInit(CodeBlock.Builder cb, FieldSpec f) {
+        if (f.source() instanceof Source.Text) return;
+        if (f.coerce() instanceof Coerce.Nested) {
+            TypeName elemBox = TypeRefs.toTypeName(f.elemType()).box();
             if (f.isList()) {
                 cb.addStatement("final $T<$T> __list_$L = new $T<>()",
-                        CN_LIST, f.elemTypeName().box(), f.name(), CN_ARRAY_LIST);
+                        CN_LIST, elemBox, f.name(), CN_ARRAY_LIST);
             } else {
                 cb.addStatement("final $T[] __nested_$L = new $T[1]",
-                        f.elemTypeName().box(), f.name(), f.elemTypeName().box());
+                        elemBox, f.name(), elemBox);
                 cb.addStatement("final boolean[] __set_$L = new boolean[1]", f.name());
             }
         } else if (f.isList()) {
@@ -339,13 +361,15 @@ final class Emitter {
         }
     }
 
-    private void emitMapStateInit(CodeBlock.Builder cb, Model.FieldSpec f) {
-        Model.FieldSpec keyF = f.mapKeyField();
-        Model.FieldSpec valF = f.mapValueField();
-        TypeName keyT = keyF.fieldType().box();
+    private void emitMapStateInit(CodeBlock.Builder cb, FieldSpec f) {
+        FieldSpec keyF = Objects.requireNonNull(f.mapKeyField(),
+                "MapEntry field missing key sub-spec: " + f.name());
+        FieldSpec valF = Objects.requireNonNull(f.mapValueField(),
+                "MapEntry field missing value sub-spec: " + f.name());
+        TypeName keyT = TypeRefs.toTypeName(keyF.fieldType()).box();
         TypeName valStored = valF.isList()
-                ? ParameterizedTypeName.get(CN_LIST, valF.elemTypeName().box())
-                : valF.fieldType().box();
+                ? ParameterizedTypeName.get(CN_LIST, TypeRefs.toTypeName(valF.elemType()).box())
+                : TypeRefs.toTypeName(valF.fieldType()).box();
         TypeName mapT = ParameterizedTypeName.get(CN_LINKED_HASH_MAP, keyT, valStored);
         cb.addStatement("final $T __map_$L = new $T<>()", mapT, f.name(), CN_LINKED_HASH_MAP);
         if (!f.required()) {
@@ -354,59 +378,65 @@ final class Emitter {
     }
 
     /** Top-level child dispatch switch shared between record and nested helpers. */
-    private void emitTopLevelChildSwitch(CodeBlock.Builder cb, TrieNode directRoot,
-                                         Map<PrefixKey, String> slots,
-                                         List<Model.FieldSpec> descendantFields,
-                                         List<Model.FieldSpec> mapFields,
-                                         List<Model.FieldSpec> polyFields,
-                                         Model.NestedRegistry registry,
-                                         Map<String, ConverterRef> converterRefs,
-                                         String lnVar, String nsVar) {
-        if (directRoot.children.isEmpty() && descendantFields.isEmpty()
-                && mapFields.isEmpty() && polyFields.isEmpty()) {
+    private void emitTopLevelChildSwitch(CodeBlock.Builder cb, DispatchPlan plan,
+                                         NestedRegistry registry,
+                                         Map<String, ConverterRef> converterRefs) {
+        emitChildSwitchCore(cb,
+                plan.directRoot(),
+                plan.slots(),
+                plan.descendantByHead(),
+                plan.tailTries(),
+                plan.mapPlans(),
+                plan.polyFields(),
+                registry, converterRefs, "ln", "ns");
+    }
+
+    /**
+     * Core child-dispatch switch. Used both by record/nested-record bodies (via the full
+     * {@link DispatchPlan}) and by {@code @XmlMap} entries (which only carry direct-child +
+     * descendant data — no map-of-map or polymorphic dispatch).
+     */
+    private void emitChildSwitchCore(CodeBlock.Builder cb,
+                                     TrieNode directRoot,
+                                     SlotTable slots,
+                                     Map<QKey, List<DescendantBranch>> byHead,
+                                     Map<QKey, TailTrie> tailTries,
+                                     Map<FieldSpec, MapPlan> mapPlans,
+                                     List<FieldSpec> polyFields,
+                                     NestedRegistry registry,
+                                     Map<String, ConverterRef> converterRefs,
+                                     String lnVar, String nsVar) {
+        if (directRoot.children().isEmpty() && byHead.isEmpty()
+                && mapPlans.isEmpty() && polyFields.isEmpty()) {
             cb.addStatement("c.skipChild()");
             return;
         }
-        // Group descendant fields by head qname (brackets kept alongside).
-        Map<Model.QKey, List<Map.Entry<List<Predicate>, Model.FieldSpec>>> byHead = new LinkedHashMap<>();
-        for (Model.FieldSpec f : descendantFields) {
-            Model.PathSeg.Element head = (Model.PathSeg.Element) ((Model.Source.Child) f.source()).segments().get(0);
-            byHead.computeIfAbsent(new Model.QKey(head.ns(), head.name()), k -> new ArrayList<>())
-                    .add(new java.util.AbstractMap.SimpleEntry<>(head.brackets(), f));
-        }
 
-        boolean first = true;
         // Direct children, grouped by base QKey (predicate variants dispatched inside).
-        var groupedDirect = groupChildrenByQKey(directRoot);
-        for (var entry : groupedDirect.entrySet()) {
-            Model.QKey key = entry.getKey();
-            String prefix = first ? "if " : "else if ";
-            first = false;
-            cb.add("$L($S.equals($L) && $L) {\n", prefix, key.local(), lnVar, nsMatchExprVar(key.ns(), nsVar)).indent();
-            emitPredicateBranches(cb, key, entry.getValue(), slots, registry, converterRefs);
-            cb.unindent().add("}\n");
-        }
+        boolean first = emitGroupedChildArms(cb, directRoot.groupChildrenByQKey(), true,
+                slots, registry, converterRefs, lnVar, nsVar);
         // Map entry arms.
-        for (Model.FieldSpec mf : mapFields) {
-            Model.Source.MapEntry me = (Model.Source.MapEntry) mf.source();
+        for (var me : mapPlans.entrySet()) {
+            FieldSpec mf = me.getKey();
+            Source.MapEntry mm = (Source.MapEntry) mf.source();
             String prefix = first ? "if " : "else if ";
             first = false;
-            cb.add("$L($S.equals($L) && $L) {\n", prefix, me.entryLocal(), lnVar, nsMatchExprVar(me.entryNs(), nsVar)).indent();
-            emitMapEntryCase(cb, mf, registry, converterRefs);
+            cb.add("$L($S.equals($L) && $L) {\n", prefix, mm.entryLocal(), lnVar, nsMatchExprVar(mm.entryNs(), nsVar)).indent();
+            emitMapEntryCase(cb, mf, me.getValue(), registry, converterRefs);
             cb.unindent().add("}\n");
         }
         // Polymorphic arms.
-        for (Model.FieldSpec pf : polyFields) {
-            Model.PolyDispatch d = ((Model.Source.PolyChild) pf.source()).dispatch();
-            if (d instanceof Model.PolyDispatch.Tag tag) {
-                for (Model.TagVariant v : tag.variants()) {
+        for (FieldSpec pf : polyFields) {
+            PolyDispatch d = ((Source.PolyChild) pf.source()).dispatch();
+            if (d instanceof PolyDispatch.Tag tag) {
+                for (TagVariant v : tag.variants()) {
                     String prefix = first ? "if " : "else if ";
                     first = false;
                     cb.add("$L($S.equals($L) && $L) {\n", prefix, v.local(), lnVar, nsMatchExprVar(v.ns(), nsVar)).indent();
                     emitPolyAssign(cb, pf, v.subtypeFq(), registry);
                     cb.unindent().add("}\n");
                 }
-            } else if (d instanceof Model.PolyDispatch.Attr ad) {
+            } else if (d instanceof PolyDispatch.Attr ad) {
                 String prefix = first ? "if " : "else if ";
                 first = false;
                 cb.add("$L($S.equals($L) && $L) {\n", prefix, ad.wrapLocal(), lnVar, nsMatchExprVar(ad.wrapNs(), nsVar)).indent();
@@ -416,11 +446,11 @@ final class Emitter {
         }
         // Descendant heads as direct matches.
         for (var entry : byHead.entrySet()) {
-            Model.QKey head = entry.getKey();
+            QKey head = entry.getKey();
             String prefix = first ? "if " : "else if ";
             first = false;
             cb.add("$L($S.equals($L) && $L) {\n", prefix, head.local(), lnVar, nsMatchExprVar(head.ns(), nsVar)).indent();
-            emitDescendantArm(cb, head, entry.getValue(), registry, converterRefs, /*terminating=*/false);
+            emitDescendantArm(cb, head, entry.getValue(), tailTries, registry, converterRefs, /*terminating=*/false);
             cb.unindent().add("}\n");
         }
         // Else: descendant scan or skipChild.
@@ -437,12 +467,12 @@ final class Emitter {
             cb.add("$T.forEachDescendantInChild(c, (dln, dns) -> {\n", CN_ADAPTER).indent();
             boolean dfirst = true;
             for (var entry : byHead.entrySet()) {
-                Model.QKey head = entry.getKey();
+                QKey head = entry.getKey();
                 String prefix = dfirst ? "if " : "else if ";
                 dfirst = false;
                 cb.add("$L($S.equals(dln) && $L) {\n", prefix, head.local(),
                         nsMatchExprVar(head.ns(), "dns")).indent();
-                emitDescendantArm(cb, head, entry.getValue(), registry, converterRefs, /*terminating=*/true);
+                emitDescendantArm(cb, head, entry.getValue(), tailTries, registry, converterRefs, /*terminating=*/true);
                 cb.unindent().add("}\n");
             }
             cb.add("return false;\n");
@@ -452,39 +482,42 @@ final class Emitter {
     }
 
     /** One arm of the descendant dispatch — head matched, walk tail or read leaf. */
+    @SuppressWarnings("StatementWithEmptyBody")
     private void emitDescendantArm(CodeBlock.Builder cb,
-                                   Model.QKey head,
-                                   List<Map.Entry<List<Predicate>, Model.FieldSpec>> branches,
-                                   Model.NestedRegistry registry,
+                                   QKey head,
+                                   List<DescendantBranch> branches,
+                                   Map<QKey, TailTrie> tailTries,
+                                   NestedRegistry registry,
                                    Map<String, ConverterRef> converterRefs,
                                    boolean terminating) {
         // The descendant-axis head segment cannot carry a positional predicate (rejected by
         // validateChildPredicate), so brackets here are guaranteed Index-free. We can still have
         // attribute-equality predicates that select among descendant heads.
-        List<Model.FieldSpec> unguarded = new ArrayList<>();
-        List<Map.Entry<List<Predicate>, Model.FieldSpec>> guarded = new ArrayList<>();
-        for (var entry : branches) {
-            if (entry.getKey().isEmpty()) unguarded.add(entry.getValue());
+        List<FieldSpec> unguarded = new ArrayList<>();
+        List<DescendantBranch> guarded = new ArrayList<>();
+        for (DescendantBranch entry : branches) {
+            if (entry.brackets().isEmpty()) unguarded.add(entry.field());
             else guarded.add(entry);
         }
+        TailTrie tail = tailTries.get(head);
         if (guarded.isEmpty()) {
-            emitDescendantArmBody(cb, unguarded, registry, converterRefs);
+            emitDescendantArmBody(cb, head, unguarded, tail, registry, converterRefs);
             if (terminating) cb.add("return true;\n");
             return;
         }
         boolean first = true;
-        for (var entry : guarded) {
+        for (DescendantBranch entry : guarded) {
             String prefix = first ? "if " : "else if ";
             first = false;
-            CodeBlock cond = predicateExpr(entry.getKey(), head, java.util.Map.of());
+            CodeBlock cond = predicateExpr(entry.brackets(), head, new SlotTable());
             cb.add("$L($L) {\n", prefix, cond).indent();
-            emitDescendantArmBody(cb, List.of(entry.getValue()), registry, converterRefs);
+            emitDescendantArmBody(cb, head, List.of(entry.field()), tail, registry, converterRefs);
             if (terminating) cb.add("return true;\n");
             cb.unindent().add("}\n");
         }
         if (!unguarded.isEmpty()) {
             cb.add("else {\n").indent();
-            emitDescendantArmBody(cb, unguarded, registry, converterRefs);
+            emitDescendantArmBody(cb, head, unguarded, tail, registry, converterRefs);
             if (terminating) cb.add("return true;\n");
             cb.unindent().add("}\n");
         } else if (terminating) {
@@ -493,35 +526,35 @@ final class Emitter {
     }
 
     private void emitDescendantArmBody(CodeBlock.Builder cb,
-                                       List<Model.FieldSpec> headFields, Model.NestedRegistry registry,
+                                       QKey head,
+                                       List<FieldSpec> headFields,
+                                       TailTrie tail,
+                                       NestedRegistry registry,
                                        Map<String, ConverterRef> converterRefs) {
         boolean anyEmpty = headFields.stream()
-                .anyMatch(f -> ((Model.Source.Child) f.source()).segments().size() == 1);
+                .anyMatch(f -> ((Source.Child) f.source()).segments().size() == 1);
         boolean anyNonEmpty = headFields.stream()
-                .anyMatch(f -> ((Model.Source.Child) f.source()).segments().size() > 1);
+                .anyMatch(f -> ((Source.Child) f.source()).segments().size() > 1);
         if (anyEmpty && anyNonEmpty) {
             cb.add("// invalid mix — caught at validateChildPaths\n");
         }
         if (anyEmpty) {
             // Single field consuming the head element directly.
-            Model.FieldSpec leaf = headFields.get(0);
-            emitLeafReadInline(cb, leaf, registry);
+            emitLeafReadInline(cb, headFields.get(0), registry);
         } else {
-            // Tail trie: walk children.
-            TrieNode tailTrie = new TrieNode();
-            for (Model.FieldSpec f : headFields) {
-                List<Model.PathSeg> segs = ((Model.Source.Child) f.source()).segments();
-                insertIntoTrie(tailTrie, segs.subList(1, segs.size()), f);
+            // Tail trie: pre-built by DispatchPlanBuilder for this head.
+            if (tail == null) {
+                throw new IllegalStateException("missing tail trie for descendant head " + head);
             }
-            emitChildBody(cb, tailTrie, registry, converterRefs);
+            emitChildBody(cb, tail.trie(), registry, converterRefs);
         }
     }
 
     /** Read a single leaf (head=field) inline at descendant matching site. */
-    private void emitLeafReadInline(CodeBlock.Builder cb, Model.FieldSpec f,
-                                    Model.NestedRegistry registry) {
-        if (f.coerce() instanceof Model.Coerce.Nested n) {
-            String helper = registry.helperByFq.get(n.typeFq());
+    private void emitLeafReadInline(CodeBlock.Builder cb, FieldSpec f,
+                                    NestedRegistry registry) {
+        if (f.coerce() instanceof Coerce.Nested n) {
+            String helper = registry.helperName(n.typeFq());
             if (f.isList()) {
                 cb.addStatement("__list_$L.add($L(c))", f.name(), helper);
             } else {
@@ -541,7 +574,7 @@ final class Emitter {
 
     /** Walk a trie at a non-root node — at the cursor's current child element. */
     private void emitChildBody(CodeBlock.Builder cb, TrieNode node,
-                               Model.NestedRegistry registry,
+                               NestedRegistry registry,
                                Map<String, ConverterRef> converterRefs) {
         emitAttrEntries(cb, node);
         emitChildBodyContent(cb, node, registry, converterRefs);
@@ -549,8 +582,8 @@ final class Emitter {
 
     /** Pure attr reads — safe to run multiple times for overlapping predicate variants. */
     private void emitAttrEntries(CodeBlock.Builder cb, TrieNode node) {
-        for (var ae : node.attrEntries) {
-            Model.FieldSpec f = ae.field();
+        for (AttrEntry ae : node.attrEntries()) {
+            FieldSpec f = ae.field();
             cb.beginControlFlow("");
             cb.addStatement("$T __a = c.childAttr($L, $S)",
                     ClassName.get(String.class), nsLiteral(ae.ns()), ae.name());
@@ -573,14 +606,14 @@ final class Emitter {
     /** Body-consuming dispatch — text / nested / descend. Caller decides whether to gate it. */
     @SuppressWarnings("StatementWithEmptyBody")
     private void emitChildBodyContent(CodeBlock.Builder cb, TrieNode node,
-                                      Model.NestedRegistry registry,
+                                      NestedRegistry registry,
                                       Map<String, ConverterRef> converterRefs) {
-        boolean hasText = !node.textEntries.isEmpty();
-        boolean hasNested = !node.nestedEntries.isEmpty();
-        boolean hasDescend = !node.children.isEmpty();
+        boolean hasText = !node.textEntries().isEmpty();
+        boolean hasNested = !node.nestedEntries().isEmpty();
+        boolean hasDescend = !node.children().isEmpty();
         if (hasNested) {
-            for (Model.FieldSpec f : node.nestedEntries) {
-                String helper = registry.helperByFq.get(((Model.Coerce.Nested) f.coerce()).typeFq());
+            for (FieldSpec f : node.nestedEntries()) {
+                String helper = registry.helperName(((Coerce.Nested) f.coerce()).typeFq());
                 if (f.isList()) {
                     cb.addStatement("__list_$L.add($L(c))", f.name(), helper);
                 } else {
@@ -591,7 +624,7 @@ final class Emitter {
         } else if (hasText) {
             cb.addStatement("$T __t_loc = c.childLocation()", CN_LOCATION);
             cb.addStatement("$T __t = c.childText(false)", ClassName.get(String.class));
-            for (Model.FieldSpec f : node.textEntries) {
+            for (FieldSpec f : node.textEntries()) {
                 if (f.isList()) {
                     cb.addStatement("__list_$L.add(__t)", f.name());
                 } else {
@@ -609,7 +642,8 @@ final class Emitter {
             // Counter slots for direct edges under `node` must outlive the per-sibling lambda
             // — declare them here, BEFORE entering forEachChild, so increments accumulate
             // across siblings of the same parent.
-            Map<PrefixKey, String> slots = declareCounterSlots(cb, groupChildrenByQKey(node));
+            SlotTable slots = node.allocateSlots();
+            declareSlotsCode(cb, slots);
             cb.add("$T.forEachChild(c, ($L, $L) -> {\n", CN_ADAPTER, lnVar, nsVar).indent();
             emitChildrenSwitch(cb, node, slots, registry, converterRefs, lnVar, nsVar);
             cb.unindent().add("});\n");
@@ -621,32 +655,24 @@ final class Emitter {
     }
 
     private void emitChildrenSwitch(CodeBlock.Builder cb, TrieNode node,
-                                    Map<PrefixKey, String> slots,
-                                    Model.NestedRegistry registry,
+                                    SlotTable slots,
+                                    NestedRegistry registry,
                                     Map<String, ConverterRef> converterRefs,
                                     String lnVar, String nsVar) {
-        if (node.children.isEmpty()) {
+        if (node.children().isEmpty()) {
             cb.addStatement("c.skipChild()");
             return;
         }
-        var grouped = groupChildrenByQKey(node);
-        boolean first = true;
-        for (var entry : grouped.entrySet()) {
-            Model.QKey k = entry.getKey();
-            String prefix = first ? "if " : "else if ";
-            first = false;
-            cb.add("$L($S.equals($L) && $L) {\n", prefix, k.local(), lnVar, nsMatchExprVar(k.ns(), nsVar)).indent();
-            emitPredicateBranches(cb, k, entry.getValue(), slots, registry, converterRefs);
-            cb.unindent().add("}\n");
-        }
+        emitGroupedChildArms(cb, node.groupChildrenByQKey(), true,
+                slots, registry, converterRefs, lnVar, nsVar);
         cb.add("else {\n").indent();
         cb.addStatement("c.skipChild()");
         cb.unindent().add("}\n");
     }
 
-    private void emitPolyAssign(CodeBlock.Builder cb, Model.FieldSpec f, String subtypeFq,
-                                Model.NestedRegistry registry) {
-        String helper = registry.helperByFq.get(subtypeFq);
+    private void emitPolyAssign(CodeBlock.Builder cb, FieldSpec f, String subtypeFq,
+                                NestedRegistry registry) {
+        String helper = registry.helperName(subtypeFq);
         if (f.isList()) {
             cb.addStatement("__list_$L.add($L(c))", f.name(), helper);
         } else {
@@ -655,12 +681,12 @@ final class Emitter {
         }
     }
 
-    private void emitPolyAttrSwitch(CodeBlock.Builder cb, Model.FieldSpec f,
-                                    Model.PolyDispatch.Attr d, Model.NestedRegistry registry) {
+    private void emitPolyAttrSwitch(CodeBlock.Builder cb, FieldSpec f,
+                                    PolyDispatch.Attr d, NestedRegistry registry) {
         cb.addStatement("$T __disc_$L = c.childAttr($L, $S)",
                 ClassName.get(String.class), f.name(), nsLiteral(d.attrNs()), d.attrLocal());
         boolean first = true;
-        for (Model.AttrVariant v : d.variants()) {
+        for (AttrVariant v : d.variants()) {
             String prefix = first ? "if " : "else if ";
             first = false;
             cb.add("$L($T.equals(__disc_$L, $S)) {\n", prefix, CN_OBJECTS, f.name(), v.value()).indent();
@@ -673,13 +699,17 @@ final class Emitter {
     }
 
     /** Build map entry: read key + value via synthetic specs, then store in __map_X. */
-    private void emitMapEntryCase(CodeBlock.Builder cb, Model.FieldSpec f,
-                                  Model.NestedRegistry registry,
+    private void emitMapEntryCase(CodeBlock.Builder cb, FieldSpec f,
+                                  MapPlan mp,
+                                  NestedRegistry registry,
                                   Map<String, ConverterRef> converterRefs) {
-        Model.FieldSpec keyF = f.mapKeyField();
-        Model.FieldSpec valF = f.mapValueField();
-        for (Model.FieldSpec sf : List.of(keyF, valF)) {
-            if (sf.source() instanceof Model.Source.Attr a) {
+        FieldSpec keyF = Objects.requireNonNull(f.mapKeyField(),
+                "MapEntry field missing key sub-spec: " + f.name());
+        FieldSpec valF = Objects.requireNonNull(f.mapValueField(),
+                "MapEntry field missing value sub-spec: " + f.name());
+        List<FieldSpec> mapSubFields = List.of(keyF, valF);
+        for (FieldSpec sf : mapSubFields) {
+            if (sf.source() instanceof Source.Attr a) {
                 if (sf.isList()) {
                     cb.addStatement("final $T<$T> __list_$L = new $T<>()",
                             CN_LIST, ClassName.get(String.class), sf.name(), CN_ARRAY_LIST);
@@ -698,19 +728,10 @@ final class Emitter {
                 emitFieldStateInit(cb, sf);
             }
         }
-        // Build trie of synthetic child fields (direct + descendant).
-        TrieNode root = new TrieNode();
-        List<Model.FieldSpec> descend = new ArrayList<>();
-        for (Model.FieldSpec sf : List.of(keyF, valF)) {
-            if (sf.source() instanceof Model.Source.Child sc) {
-                if (sc.descendant()) descend.add(sf);
-                else insertIntoTrie(root, sc.segments(), sf);
-            }
-        }
-        if (!root.children.isEmpty() || !descend.isEmpty()) {
-            Map<PrefixKey, String> mapSlots = declareCounterSlots(cb, groupChildrenByQKey(root));
+        if (!mp.directRoot().isEmpty() || !mp.descendantByHead().isEmpty()) {
+            declareSlotsCode(cb, mp.slots());
             cb.add("$T.forEachSubrecordChild(c, (mln, mns) -> {\n", CN_ADAPTER).indent();
-            emitTopLevelChildSwitch(cb, root, mapSlots, descend, List.of(), List.of(), registry, converterRefs, "mln", "mns");
+            emitMapEntrySwitch(cb, mp, registry, converterRefs);
             cb.unindent().add("});\n");
         }
         // Coerce key + value, store.
@@ -727,13 +748,26 @@ final class Emitter {
         }
     }
 
+    /**
+     * Map-entry child dispatch: pure plan walker over the pre-built {@link MapPlan}.
+     * MapPlan has no map-of-map or polymorphic children.
+     */
+    private void emitMapEntrySwitch(CodeBlock.Builder cb, MapPlan mp,
+                                    NestedRegistry registry,
+                                    Map<String, ConverterRef> converterRefs) {
+        emitChildSwitchCore(cb, mp.directRoot(), mp.slots(),
+                mp.descendantByHead(), mp.tailTries(),
+                java.util.Collections.emptyMap(), java.util.Collections.emptyList(),
+                registry, converterRefs, "mln", "mns");
+    }
+
     /** Emits {@code final T __final_name = ...;} for one field. */
-    private CodeBlock coerceField(Model.FieldSpec f,
+    private CodeBlock coerceField(FieldSpec f,
                                   Map<String, ConverterRef> converterRefs) {
         CodeBlock.Builder cb = CodeBlock.builder();
-        TypeName declared = f.fieldType();
+        TypeName declared = TypeRefs.toTypeName(f.fieldType());
 
-        if (f.coerce() instanceof Model.Coerce.MapAggregate) {
+        if (f.coerce() instanceof Coerce.MapAggregate) {
             if (f.required()) {
                 cb.addStatement("final $T __final_$L = $T.unmodifiableMap(__map_$L)",
                         declared, f.name(), CN_COLLECTIONS, f.name());
@@ -744,7 +778,7 @@ final class Emitter {
             return cb.build();
         }
 
-        if (f.source() instanceof Model.Source.Attr) {
+        if (f.source() instanceof Source.Attr) {
             if (f.required()) {
                 CodeBlock raw = CodeBlock.of("$T.INSTANCE.requireString($S, __raw_$L, __loc)",
                         CN_COERCIONS, f.name(), f.name());
@@ -758,7 +792,7 @@ final class Emitter {
             }
             return cb.build();
         }
-        if (f.source() instanceof Model.Source.Text) {
+        if (f.source() instanceof Source.Text) {
             cb.addStatement("final $T __final_$L = $L",
                     declared, f.name(),
                     coerceScalar(f, CodeBlock.of("__raw_$L", f.name()),
@@ -766,7 +800,7 @@ final class Emitter {
             return cb.build();
         }
         // Source.Child or Source.PolyChild
-        if (f.coerce() instanceof Model.Coerce.Nested) {
+        if (f.coerce() instanceof Coerce.Nested) {
             if (f.isList()) {
                 cb.addStatement("final $T __final_$L = $T.unmodifiableList(__list_$L)",
                         declared, f.name(), CN_COLLECTIONS, f.name());
@@ -783,7 +817,8 @@ final class Emitter {
         }
         // Scalar/temporal/decimal/custom child text.
         if (f.isList()) {
-            cb.addStatement("final $T<$T> __final_$L = new $T<>()", CN_LIST, f.elemTypeName().box(), f.name(), CN_ARRAY_LIST);
+            TypeName elemBox = TypeRefs.toTypeName(f.elemType()).box();
+            cb.addStatement("final $T<$T> __final_$L = new $T<>()", CN_LIST, elemBox, f.name(), CN_ARRAY_LIST);
             cb.beginControlFlow("for ($T __r : __list_$L)", ClassName.get(String.class), f.name());
             cb.addStatement("__final_$L.add($L)", f.name(),
                     coerceScalar(f, CodeBlock.of("__r"), CodeBlock.of("__loc"), converterRefs));
@@ -810,14 +845,14 @@ final class Emitter {
         return cb.build();
     }
 
-    private CodeBlock coerceScalar(Model.FieldSpec f, CodeBlock raw, CodeBlock lc,
+    private CodeBlock coerceScalar(FieldSpec f, CodeBlock raw, CodeBlock lc,
                                    Map<String, ConverterRef> converterRefs) {
-        if (f.coerce() instanceof Model.Coerce.AsString) return raw;
-        if (f.coerce() instanceof Model.Coerce.Custom c) {
+        if (f.coerce() instanceof Coerce.AsString) return raw;
+        if (f.coerce() instanceof Coerce.Custom c) {
             ConverterRef ref = converterRefs.get(c.converterFq());
             return CodeBlock.of("$L.convert($L, $L)", ref.varName, raw, lc);
         }
-        if (f.coerce() instanceof Model.Coerce.Scalar s) {
+        if (f.coerce() instanceof Coerce.Scalar s) {
             return switch (s.kind()) {
                 case INT -> CodeBlock.of("$T.INSTANCE.toInt($S, $L, $L)", CN_COERCIONS, f.name(), raw, lc);
                 case LONG -> CodeBlock.of("$T.INSTANCE.toLong($S, $L, $L)", CN_COERCIONS, f.name(), raw, lc);
@@ -826,7 +861,7 @@ final class Emitter {
                 default -> raw;
             };
         }
-        if (f.coerce() instanceof Model.Coerce.Temporal t) {
+        if (f.coerce() instanceof Coerce.Temporal t) {
             return switch (t.kind()) {
                 case LOCAL_DATE -> CodeBlock.of("$T.INSTANCE.toLocalDate($S, $L, $S, $L)",
                         CN_COERCIONS, f.name(), raw, t.pattern(), lc);
@@ -837,7 +872,7 @@ final class Emitter {
                 default -> raw;
             };
         }
-        if (f.coerce() instanceof Model.Coerce.Decimal d) {
+        if (f.coerce() instanceof Coerce.Decimal d) {
             return CodeBlock.of("$T.INSTANCE.toBigDecimal($S, $L, $S, $L)",
                     CN_COERCIONS, f.name(), raw, d.pattern(), lc);
         }
@@ -854,134 +889,34 @@ final class Emitter {
         return CodeBlock.of("($S.equals($L) || c.getIgnoreNamespace())", ns, var);
     }
 
-    /** Per-emitter trie node (separate from Classifier's: fewer constraints). */
-    private static final class TrieNode {
-        final Map<Model.EdgeKey, TrieNode> children = new LinkedHashMap<>();
-        final List<AttrEntry> attrEntries = new ArrayList<>();
-        final List<Model.FieldSpec> textEntries = new ArrayList<>();
-        final List<Model.FieldSpec> nestedEntries = new ArrayList<>();
-    }
-
-    private record AttrEntry(String ns, String name, Model.FieldSpec field) {}
-
-    private void insertIntoTrie(TrieNode root, List<Model.PathSeg> segments, Model.FieldSpec f) {
-        TrieNode node = root;
-        int i = 0;
-        for (; i < segments.size(); i++) {
-            if (!(segments.get(i) instanceof Model.PathSeg.Element e)) break;
-            Model.EdgeKey edge = new Model.EdgeKey(new Model.QKey(e.ns(), e.name()), e.brackets());
-            node = node.children.computeIfAbsent(edge, k -> new TrieNode());
+    /** Emits {@code int[] __cnt_<slot> = new int[]{0};} declarations for the precomputed slots. */
+    private void declareSlotsCode(CodeBlock.Builder cb, SlotTable slots) {
+        for (var e : slots) {
+            cb.addStatement("final int[] __cnt_$L = new int[]{0}", e.getValue());
         }
-        if (i == segments.size()) {
-            if (f.coerce() instanceof Model.Coerce.Nested) node.nestedEntries.add(f);
-            else node.textEntries.add(f);
-        } else if (i == segments.size() - 1 && segments.get(i) instanceof Model.PathSeg.AttrLeaf al) {
-            node.attrEntries.add(new AttrEntry(al.ns(), al.name(), f));
-        }
-    }
-
-    /** Group children of one trie node by base QKey, collecting bracket-list variants in declared order. */
-    private LinkedHashMap<Model.QKey, List<Map.Entry<List<Predicate>, TrieNode>>> groupChildrenByQKey(TrieNode node) {
-        LinkedHashMap<Model.QKey, List<Map.Entry<List<Predicate>, TrieNode>>> grouped = new LinkedHashMap<>();
-        for (var entry : node.children.entrySet()) {
-            Model.EdgeKey edge = entry.getKey();
-            grouped.computeIfAbsent(edge.qkey(), k -> new ArrayList<>())
-                    .add(new java.util.AbstractMap.SimpleEntry<>(edge.brackets(), entry.getValue()));
-        }
-        return grouped;
-    }
-
-    /** Slot identity: counter is keyed by (qname, prefix-of-first-Index-bracket). */
-    private record PrefixKey(Model.QKey qkey, List<Predicate> prefix) {}
-
-    private static boolean containsIndex(Predicate p) {
-        if (p instanceof Predicate.Index) return true;
-        if (p instanceof Predicate.AttrEq) return false;
-        if (p instanceof Predicate.And and) return containsIndex(and.getL()) || containsIndex(and.getR());
-        if (p instanceof Predicate.Or or) return containsIndex(or.getL()) || containsIndex(or.getR());
-        return false;
-    }
-
-    private static boolean bracketsHaveIndex(List<Predicate> brackets) {
-        for (Predicate b : brackets) if (containsIndex(b)) return true;
-        return false;
-    }
-
-    /** Brackets up to (but not including) the first Index-bearing bracket. */
-    private static List<Predicate> prefixOfFirstIndex(List<Predicate> brackets) {
-        List<Predicate> out = new ArrayList<>();
-        for (Predicate b : brackets) {
-            if (containsIndex(b)) break;
-            out.add(b);
-        }
-        return Collections.unmodifiableList(out);
     }
 
     /**
-     * Walks {@code p} left-to-right and returns the first Index value encountered. The grammar
-     * permits {@code [2 and @x='y']} which yields {@code And(Index(2), AttrEq(...))} — Index can
-     * appear anywhere.
+     * Emits {@code if/else if} arms over a {@code groupChildrenByQKey} map, one per unique
+     * base {@link QKey}. Returns the updated {@code first} flag so callers can chain
+     * additional sibling arms (map entries, polymorphic variants, etc.).
      */
-    private static int firstIndexValue(Predicate p) {
-        if (p instanceof Predicate.Index idx) return idx.getN();
-        if (p instanceof Predicate.And and) {
-            return containsIndex(and.getL()) ? firstIndexValue(and.getL()) : firstIndexValue(and.getR());
+    private boolean emitGroupedChildArms(CodeBlock.Builder cb,
+                                         Map<QKey, List<Map.Entry<List<Predicate>, TrieNode>>> grouped,
+                                         boolean first,
+                                         SlotTable slots,
+                                         NestedRegistry registry,
+                                         Map<String, ConverterRef> converterRefs,
+                                         String lnVar, String nsVar) {
+        for (var entry : grouped.entrySet()) {
+            QKey key = entry.getKey();
+            String prefix = first ? "if " : "else if ";
+            first = false;
+            cb.add("$L($S.equals($L) && $L) {\n", prefix, key.local(), lnVar, nsMatchExprVar(key.ns(), nsVar)).indent();
+            emitPredicateBranches(cb, key, entry.getValue(), slots, registry, converterRefs);
+            cb.unindent().add("}\n");
         }
-        if (p instanceof Predicate.Or) {
-            throw new IllegalStateException("Index inside Or predicate is not supported (predicate=" + p + ")");
-        }
-        throw new IllegalStateException("firstIndexValue: predicate has no Index (" + p + ")");
-    }
-
-    /**
-     * Returns {@code p} with all Index sub-predicates removed, or {@code null} if removal leaves
-     * nothing. Only defined for And-shaped composites — Or with embedded Index is rejected.
-     */
-    private static Predicate stripIndex(Predicate p) {
-        if (p instanceof Predicate.Index) return null;
-        if (p instanceof Predicate.AttrEq) return p;
-        if (p instanceof Predicate.And and) {
-            Predicate l = stripIndex(and.getL());
-            Predicate r = stripIndex(and.getR());
-            if (l == null) return r;
-            if (r == null) return l;
-            return new Predicate.And(l, r);
-        }
-        if (p instanceof Predicate.Or) {
-            throw new IllegalStateException("Index inside Or predicate is not supported (predicate=" + p + ")");
-        }
-        return p;
-    }
-
-    private static String slotName(Model.QKey qkey, int ordinal) {
-        String safe = qkey.local().replaceAll("[^A-Za-z0-9_]", "_");
-        return safe + "_" + ordinal;
-    }
-
-    /**
-     * Emits {@code int[] __cnt_<slot> = new int[]{0};} declarations for each {@code (qkey, prefix)}
-     * slot needed by direct edges in {@code grouped} that contain a positional predicate. Returns
-     * a map from {@link PrefixKey} to the slot variable name so call sites can reference
-     * {@code __cnt_<name>}/{@code __pre_<name>}/{@code __pos_<name>}.
-     */
-    private Map<PrefixKey, String> declareCounterSlots(
-            CodeBlock.Builder cb,
-            Map<Model.QKey, List<Map.Entry<List<Predicate>, TrieNode>>> grouped) {
-        LinkedHashMap<PrefixKey, String> slots = new LinkedHashMap<>();
-        for (var qe : grouped.entrySet()) {
-            Model.QKey qk = qe.getKey();
-            for (var be : qe.getValue()) {
-                List<Predicate> brackets = be.getKey();
-                if (!bracketsHaveIndex(brackets)) continue;
-                List<Predicate> prefix = prefixOfFirstIndex(brackets);
-                PrefixKey key = new PrefixKey(qk, prefix);
-                if (slots.containsKey(key)) continue;
-                String name = slotName(qk, slots.size());
-                slots.put(key, name);
-                cb.addStatement("final int[] __cnt_$L = new int[]{0}", name);
-            }
-        }
-        return slots;
+        return first;
     }
 
     /**
@@ -995,15 +930,15 @@ final class Emitter {
      *     a single element body can only be consumed once.
      */
     private void emitPredicateBranches(CodeBlock.Builder cb,
-                                       Model.QKey qkey,
+                                       QKey qkey,
                                        List<Map.Entry<List<Predicate>, TrieNode>> branches,
-                                       Map<PrefixKey, String> slots,
-                                       Model.NestedRegistry registry,
+                                       SlotTable slots,
+                                       NestedRegistry registry,
                                        Map<String, ConverterRef> converterRefs) {
         // Per-element pre-compute: increment any counters that key on this qname BEFORE the
         // two-pass dispatch. Each element produces exactly one increment per slot, regardless of
         // how many attr-only / body branches reference that slot.
-        for (var slotEntry : slots.entrySet()) {
+        for (var slotEntry : slots) {
             PrefixKey key = slotEntry.getKey();
             if (!key.qkey().equals(qkey)) continue;
             String name = slotEntry.getValue();
@@ -1027,7 +962,7 @@ final class Emitter {
         }
         for (var entry : branches) {
             TrieNode child = entry.getValue();
-            if (child.attrEntries.isEmpty()) continue;
+            if (child.attrEntries().isEmpty()) continue;
             List<Predicate> brackets = entry.getKey();
             CodeBlock cond = predicateExpr(brackets, qkey, slots);
             cb.add("if ($L) {\n", cond).indent();
@@ -1036,7 +971,7 @@ final class Emitter {
         }
         List<Map.Entry<List<Predicate>, TrieNode>> bodyBranches = new ArrayList<>();
         for (var entry : branches) {
-            if (nodeHasBodyContent(entry.getValue())) bodyBranches.add(entry);
+            if (entry.getValue().hasBodyContent()) bodyBranches.add(entry);
         }
         if (bodyBranches.isEmpty()) {
             cb.addStatement("c.skipChild()");
@@ -1057,10 +992,6 @@ final class Emitter {
         cb.unindent().add("}\n");
     }
 
-    private static boolean nodeHasBodyContent(TrieNode node) {
-        return !node.textEntries.isEmpty() || !node.nestedEntries.isEmpty() || !node.children.isEmpty();
-    }
-
     /**
      * Emit a boolean expression for {@code brackets} in the context of {@code qkey}, optionally
      * referencing counter slots from {@code slots}. When any bracket contains a positional
@@ -1068,16 +999,16 @@ final class Emitter {
      * references are emitted; everything before the first Index becomes part of the slot's
      * prefix expression and everything after is appended as plain expressions.
      */
-    private CodeBlock predicateExpr(List<Predicate> brackets, Model.QKey qkey, Map<PrefixKey, String> slots) {
+    private CodeBlock predicateExpr(List<Predicate> brackets, QKey qkey, SlotTable slots) {
         if (brackets.isEmpty()) return CodeBlock.of("true");
-        if (!bracketsHaveIndex(brackets)) {
+        if (!PredicateAnalysis.bracketsHaveIndex(brackets)) {
             Predicate folded = brackets.get(0);
             for (int i = 1; i < brackets.size(); i++) folded = new Predicate.And(folded, brackets.get(i));
             return plainPredicateExpr(folded);
         }
         int firstIdxIndex = -1;
         for (int i = 0; i < brackets.size(); i++) {
-            if (containsIndex(brackets.get(i))) { firstIdxIndex = i; break; }
+            if (PredicateAnalysis.containsIndex(brackets.get(i))) { firstIdxIndex = i; break; }
         }
         if (firstIdxIndex < 0) {
             throw new IllegalStateException("predicateExpr called with no Index in brackets — bug in bracketsHaveIndex");
@@ -1085,20 +1016,16 @@ final class Emitter {
         List<Predicate> prefix = brackets.subList(0, firstIdxIndex);
         Predicate firstIdxBracket = brackets.get(firstIdxIndex);
         List<Predicate> suffix = brackets.subList(firstIdxIndex + 1, brackets.size());
-        int n = firstIndexValue(firstIdxBracket);
-        PrefixKey slotKey = new PrefixKey(qkey, prefixOfFirstIndex(brackets));
+        int n = PredicateAnalysis.firstIndexValue(firstIdxBracket);
+        PrefixKey slotKey = new PrefixKey(qkey, PredicateAnalysis.prefixOfFirstIndex(brackets));
         String slotName = slots.get(slotKey);
-        if (slotName == null) {
-            throw new IllegalStateException("missing counter slot for " + slotKey + " at qkey=" + qkey
-                    + " — bug in counter detection");
-        }
         List<CodeBlock> parts = new ArrayList<>();
         // When the prefix is empty there is no __pre_ variable — the counter is always incremented.
         if (!prefix.isEmpty()) parts.add(CodeBlock.of("__pre_$L", slotName));
         parts.add(CodeBlock.of("(__pos_$L == $L)", slotName, n));
         // If the first-index bracket also contains non-Index predicates (e.g. `[2 and @x='y']`),
         // emit those alongside the position check.
-        Predicate residual = stripIndex(firstIdxBracket);
+        Predicate residual = PredicateAnalysis.stripIndex(firstIdxBracket);
         if (residual != null) parts.add(plainPredicateExpr(residual));
         // Suffix: every bracket after the one that introduced the Index. These are evaluated as
         // ordinary attribute predicates against the current element — they refine the position

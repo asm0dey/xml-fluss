@@ -64,9 +64,8 @@ class PathParserTest {
         val cp = parse("//book[@a='1'][@b='2']")
         val p = (cp.steps.last() as Step.Named).predicate
         assertTrue(p is Predicate.And)
-        val and = p as Predicate.And
-        val l = and.l as Predicate.AttrEq
-        val r = and.r as Predicate.AttrEq
+        val l = p.l as Predicate.AttrEq
+        val r = p.r as Predicate.AttrEq
         assertEquals("a", l.name.local)
         assertEquals("1", l.value)
         assertEquals("b", r.name.local)

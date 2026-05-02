@@ -1,19 +1,9 @@
 package xmlfluss.codegen.plan;
 
-import xmlfluss.codegen.model.Coerce;
-import xmlfluss.codegen.model.EdgeKey;
-import xmlfluss.codegen.model.FieldSpec;
-import xmlfluss.codegen.model.PathSeg;
-import xmlfluss.codegen.model.QKey;
+import xmlfluss.codegen.model.*;
 import xmlfluss.path.Predicate;
 
-import java.util.AbstractMap;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 
 /**
  * Mutable trie node used to build the dispatch plan for a record's child paths.
@@ -98,7 +88,7 @@ public final class TrieNode {
      * in declared insertion order. The returned map is mutable but emitters typically
      * treat it as read-only.
      */
-    public LinkedHashMap<QKey, List<Map.Entry<List<Predicate>, TrieNode>>> groupChildrenByQKey() {
+    public Map<QKey, List<Map.Entry<List<Predicate>, TrieNode>>> groupChildrenByQKey() {
         LinkedHashMap<QKey, List<Map.Entry<List<Predicate>, TrieNode>>> grouped = new LinkedHashMap<>();
         for (var entry : children.entrySet()) {
             EdgeKey edge = entry.getKey();

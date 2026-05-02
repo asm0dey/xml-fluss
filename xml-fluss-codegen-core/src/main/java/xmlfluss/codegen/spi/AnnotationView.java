@@ -3,8 +3,6 @@ package xmlfluss.codegen.spi;
 import org.jspecify.annotations.Nullable;
 import xmlfluss.codegen.model.TypeRef;
 
-import java.util.List;
-
 /**
  * Read-only view over the annotations on a symbol. The classifier consults this view to
  * read {@code @XmlAttr}, {@code @XmlChild}, {@code @XmlText}, etc. without depending on
@@ -26,9 +24,6 @@ public interface AnnotationView {
      * for {@code stringValue("xmlfluss.XmlChild", "value")}.
      */
     @Nullable String stringValue(String fqn, String attr);
-
-    /** Repeated string attribute (annotation arrays). */
-    @Nullable List<String> stringArrayValue(String fqn, String attr);
 
     /**
      * {@code Class<?>}-valued attribute (e.g. {@code @XmlConverter(MyConv.class)}).

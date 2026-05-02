@@ -34,13 +34,6 @@ public final class FakeAnnotationView implements AnnotationView {
     }
 
     @Override
-    @SuppressWarnings("unchecked")
-    public @Nullable List<String> stringArrayValue(String fqn, String attr) {
-        Object v = lookup(fqn, attr);
-        return v instanceof List<?> l ? (List<String>) l : null;
-    }
-
-    @Override
     public @Nullable TypeRef classValue(String fqn, String attr) {
         Object v = lookup(fqn, attr);
         return v instanceof TypeRef t ? t : null;

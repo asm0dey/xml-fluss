@@ -1,16 +1,10 @@
 package xmlfluss.ksp
 
-import com.squareup.kotlinpoet.BOOLEAN
-import com.squareup.kotlinpoet.ClassName
-import com.squareup.kotlinpoet.DOUBLE
-import com.squareup.kotlinpoet.INT
-import com.squareup.kotlinpoet.LIST
-import com.squareup.kotlinpoet.LONG
-import com.squareup.kotlinpoet.MAP
+import com.squareup.kotlinpoet.*
 import com.squareup.kotlinpoet.ParameterizedTypeName.Companion.parameterizedBy
-import com.squareup.kotlinpoet.STRING
-import com.squareup.kotlinpoet.TypeName
 import xmlfluss.codegen.model.TypeRef
+
+private const val JAVA_LANG_PKG = "java.lang"
 
 /**
  * Translation between the neutral [TypeRef] carried by core specs and KotlinPoet
@@ -42,11 +36,11 @@ internal object TypeRefs {
             // every scalar field via `TypeRefClassification.boxedScalar`). Map them back
             // to Kotlin types so the emitter doesn't reference `java.lang.Integer` etc.,
             // and so a `Map<String, Int>` field stays `Map<String, Int>` end-to-end.
-            ref.packageName() == "java.lang" && ref.simpleName() == "String" -> STRING
-            ref.packageName() == "java.lang" && ref.simpleName() == "Integer" -> INT
-            ref.packageName() == "java.lang" && ref.simpleName() == "Long" -> LONG
-            ref.packageName() == "java.lang" && ref.simpleName() == "Double" -> DOUBLE
-            ref.packageName() == "java.lang" && ref.simpleName() == "Boolean" -> BOOLEAN
+            ref.packageName() == JAVA_LANG_PKG && ref.simpleName() == "String" -> STRING
+            ref.packageName() == JAVA_LANG_PKG && ref.simpleName() == "Integer" -> INT
+            ref.packageName() == JAVA_LANG_PKG && ref.simpleName() == "Long" -> LONG
+            ref.packageName() == JAVA_LANG_PKG && ref.simpleName() == "Double" -> DOUBLE
+            ref.packageName() == JAVA_LANG_PKG && ref.simpleName() == "Boolean" -> BOOLEAN
             ref.packageName() == "java.util" && ref.simpleName() == "List" -> {
                 val args = ref.typeArguments().map { toTypeName(it) }
                 if (args.isEmpty()) LIST else LIST.parameterizedBy(*args.toTypedArray())

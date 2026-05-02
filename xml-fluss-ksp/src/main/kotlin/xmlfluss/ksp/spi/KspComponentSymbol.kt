@@ -1,10 +1,6 @@
 package xmlfluss.ksp.spi
 
-import com.google.devtools.ksp.symbol.KSAnnotated
-import com.google.devtools.ksp.symbol.KSClassDeclaration
-import com.google.devtools.ksp.symbol.KSPropertyDeclaration
-import com.google.devtools.ksp.symbol.KSType
-import com.google.devtools.ksp.symbol.KSValueParameter
+import com.google.devtools.ksp.symbol.*
 import xmlfluss.codegen.model.TypeRef
 import xmlfluss.codegen.spi.AnnotationView
 import xmlfluss.codegen.spi.ComponentSymbol

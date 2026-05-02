@@ -16,13 +16,6 @@ class KspAnnotationView(private val annotated: KSAnnotated) : AnnotationView {
         return v as? String
     }
 
-    @Suppress("UNCHECKED_CAST")
-    override fun stringArrayValue(fqn: String, attr: String): List<String>? {
-        val v = readArg(fqn, attr) ?: return null
-        if (v is List<*> && v.all { it is String }) return v as List<String>
-        return null
-    }
-
     override fun classValue(fqn: String, attr: String): TypeRef? {
         val v = readArg(fqn, attr) ?: return null
         val type = v as? KSType ?: return null

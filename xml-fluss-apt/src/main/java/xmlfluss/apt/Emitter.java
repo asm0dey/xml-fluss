@@ -1,33 +1,9 @@
 package xmlfluss.apt;
 
-import com.palantir.javapoet.AnnotationSpec;
-import com.palantir.javapoet.ClassName;
-import com.palantir.javapoet.CodeBlock;
-import com.palantir.javapoet.JavaFile;
-import com.palantir.javapoet.MethodSpec;
-import com.palantir.javapoet.ParameterSpec;
-import com.palantir.javapoet.ParameterizedTypeName;
-import com.palantir.javapoet.TypeName;
-import com.palantir.javapoet.TypeSpec;
-import com.palantir.javapoet.WildcardTypeName;
-import xmlfluss.codegen.model.AttrVariant;
-import xmlfluss.codegen.model.Coerce;
+import com.palantir.javapoet.*;
+import xmlfluss.codegen.model.*;
 import xmlfluss.codegen.model.FieldSpec;
-import xmlfluss.codegen.model.NestedRegistry;
-import xmlfluss.codegen.model.PolyDispatch;
-import xmlfluss.codegen.model.QKey;
-import xmlfluss.codegen.model.RecordSpec;
-import xmlfluss.codegen.model.Source;
-import xmlfluss.codegen.model.TagVariant;
-import xmlfluss.codegen.plan.AttrEntry;
-import xmlfluss.codegen.plan.DescendantBranch;
-import xmlfluss.codegen.plan.DispatchPlan;
-import xmlfluss.codegen.plan.MapPlan;
-import xmlfluss.codegen.plan.PredicateAnalysis;
-import xmlfluss.codegen.plan.PrefixKey;
-import xmlfluss.codegen.plan.SlotTable;
-import xmlfluss.codegen.plan.TailTrie;
-import xmlfluss.codegen.plan.TrieNode;
+import xmlfluss.codegen.plan.*;
 import xmlfluss.path.Predicate;
 
 import javax.annotation.processing.Generated;
@@ -38,11 +14,7 @@ import javax.tools.Diagnostic;
 import java.io.IOException;
 import java.io.InputStream;
 import java.time.LocalDate;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 import java.util.function.Consumer;
 
 /**
@@ -71,6 +43,10 @@ final class Emitter {
     private static final ClassName CN_MISSING_EX = ClassName.get("xmlfluss", "XmlParseException", "Missing");
     private static final ClassName CN_COERCIONS = ClassName.get("xmlfluss.runtime", "Coercions");
     private static final ClassName CN_ADAPTER = ClassName.get("xmlfluss.runtime", "JavaCursorAdapter");
+    public static final String SKIP_CHILD = "c.skipChild()";
+    public static final String ELSE = "else {\n";
+    public static final String RETURN_TRUE = "return true";
+    public static final String ELSE_IF = "else if ";
 
     private final ProcessingEnvironment env;
 
@@ -206,7 +182,8 @@ final class Emitter {
         return b.build();
     }
 
-    private record ConverterRef(ClassName cls, String varName) {}
+    private record ConverterRef(ClassName cls, String varName) {
+    }
 
     private Map<String, ConverterRef> collectConverters(RecordSpec topLevel,
                                                         NestedRegistry registry) {
@@ -219,12 +196,11 @@ final class Emitter {
     }
 
     private void registerConverter(Map<String, ConverterRef> sink, FieldSpec f) {
-        if (f.coerce() instanceof Coerce.Custom c) {
-            if (!sink.containsKey(c.converterFq())) {
-                String varName = "__conv_" + sink.size();
-                sink.put(c.converterFq(), new ConverterRef(TypeRefs.toClassName(c.converterClass()), varName));
-            }
+        if (f.coerce() instanceof Coerce.Custom c && !sink.containsKey(c.converterFq())) {
+            String varName = "__conv_" + sink.size();
+            sink.put(c.converterFq(), new ConverterRef(TypeRefs.toClassName(c.converterClass()), varName));
         }
+
         if (f.mapKeyField() != null) registerConverter(sink, f.mapKeyField());
         if (f.mapValueField() != null) registerConverter(sink, f.mapValueField());
     }
@@ -247,7 +223,7 @@ final class Emitter {
                         .addParameter(ParameterSpec.builder(consumerSuperRec, "action").build())
                         .addStatement("if (!cursor.findNextRecord()) return false")
                         .addStatement("action.accept(__buildRecord(cursor))")
-                        .addStatement("return true")
+                        .addStatement(RETURN_TRUE)
                         .build())
                 .build();
 
@@ -337,7 +313,9 @@ final class Emitter {
         return cb.build();
     }
 
-    /** Emit per-field state holders. */
+    /**
+     * Emit per-field state holders.
+     */
     private void emitFieldStateInit(CodeBlock.Builder cb, FieldSpec f) {
         if (f.source() instanceof Source.Text) return;
         if (f.coerce() instanceof Coerce.Nested) {
@@ -377,18 +355,52 @@ final class Emitter {
         }
     }
 
-    /** Top-level child dispatch switch shared between record and nested helpers. */
+    /**
+     * Bundled inputs to {@link #emitChildSwitchCore}. Built either from a full {@link DispatchPlan}
+     * (record/nested bodies) or a {@link MapPlan} (map entries — no map-of-map or polymorphic).
+     */
+    private record ChildSwitchInputs(
+            TrieNode directRoot,
+            SlotTable slots,
+            Map<QKey, List<DescendantBranch>> byHead,
+            Map<QKey, TailTrie> tailTries,
+            Map<FieldSpec, MapPlan> mapPlans,
+            List<FieldSpec> polyFields,
+            String lnVar, String nsVar) {
+        static ChildSwitchInputs from(DispatchPlan plan, String lnVar, String nsVar) {
+            return new ChildSwitchInputs(plan.directRoot(), plan.slots(),
+                    plan.descendantByHead(), plan.tailTries(),
+                    plan.mapPlans(), plan.polyFields(), lnVar, nsVar);
+        }
+        static ChildSwitchInputs from(MapPlan mp, String lnVar, String nsVar) {
+            return new ChildSwitchInputs(mp.directRoot(), mp.slots(),
+                    mp.descendantByHead(), mp.tailTries(),
+                    Collections.emptyMap(), Collections.emptyList(), lnVar, nsVar);
+        }
+    }
+
+    /**
+     * Top-level child dispatch switch shared between record and nested helpers.
+     */
     private void emitTopLevelChildSwitch(CodeBlock.Builder cb, DispatchPlan plan,
                                          NestedRegistry registry,
                                          Map<String, ConverterRef> converterRefs) {
-        emitChildSwitchCore(cb,
-                plan.directRoot(),
-                plan.slots(),
-                plan.descendantByHead(),
-                plan.tailTries(),
-                plan.mapPlans(),
-                plan.polyFields(),
-                registry, converterRefs, "ln", "ns");
+        emitChildSwitchCore(cb, ChildSwitchInputs.from(plan, "ln", "ns"), registry, converterRefs);
+    }
+
+    /**
+     * Emits one {@code if/else if ($S.equals(ln) && nsMatch) { body }} arm. Returns the updated
+     * {@code first} flag (always {@code false}) so callers can chain.
+     */
+    private boolean emitQNameArm(CodeBlock.Builder cb, boolean first,
+                                 String local, String ns,
+                                 String lnVar, String nsVar,
+                                 Runnable body) {
+        String prefix = first ? "if " : ELSE_IF;
+        cb.add("$L($S.equals($L) && $L) {\n", prefix, local, lnVar, nsMatchExprVar(ns, nsVar)).indent();
+        body.run();
+        cb.unindent().add("}\n");
+        return false;
     }
 
     /**
@@ -396,84 +408,64 @@ final class Emitter {
      * {@link DispatchPlan}) and by {@code @XmlMap} entries (which only carry direct-child +
      * descendant data — no map-of-map or polymorphic dispatch).
      */
-    private void emitChildSwitchCore(CodeBlock.Builder cb,
-                                     TrieNode directRoot,
-                                     SlotTable slots,
-                                     Map<QKey, List<DescendantBranch>> byHead,
-                                     Map<QKey, TailTrie> tailTries,
-                                     Map<FieldSpec, MapPlan> mapPlans,
-                                     List<FieldSpec> polyFields,
+    private void emitChildSwitchCore(CodeBlock.Builder cb, ChildSwitchInputs in,
                                      NestedRegistry registry,
-                                     Map<String, ConverterRef> converterRefs,
-                                     String lnVar, String nsVar) {
-        if (directRoot.children().isEmpty() && byHead.isEmpty()
-                && mapPlans.isEmpty() && polyFields.isEmpty()) {
-            cb.addStatement("c.skipChild()");
+                                     Map<String, ConverterRef> converterRefs) {
+        if (in.directRoot.children().isEmpty() && in.byHead.isEmpty()
+                && in.mapPlans.isEmpty() && in.polyFields.isEmpty()) {
+            cb.addStatement(SKIP_CHILD);
             return;
         }
 
         // Direct children, grouped by base QKey (predicate variants dispatched inside).
-        boolean first = emitGroupedChildArms(cb, directRoot.groupChildrenByQKey(), true,
-                slots, registry, converterRefs, lnVar, nsVar);
+        boolean first = emitGroupedChildArms(cb, in.directRoot.groupChildrenByQKey(), true,
+                in.slots, registry, converterRefs, in.lnVar, in.nsVar);
         // Map entry arms.
-        for (var me : mapPlans.entrySet()) {
+        for (var me : in.mapPlans.entrySet()) {
             FieldSpec mf = me.getKey();
+            MapPlan mp = me.getValue();
             Source.MapEntry mm = (Source.MapEntry) mf.source();
-            String prefix = first ? "if " : "else if ";
-            first = false;
-            cb.add("$L($S.equals($L) && $L) {\n", prefix, mm.entryLocal(), lnVar, nsMatchExprVar(mm.entryNs(), nsVar)).indent();
-            emitMapEntryCase(cb, mf, me.getValue(), registry, converterRefs);
-            cb.unindent().add("}\n");
+            first = emitQNameArm(cb, first, mm.entryLocal(), mm.entryNs(), in.lnVar, in.nsVar,
+                    () -> emitMapEntryCase(cb, mf, mp, registry, converterRefs));
         }
         // Polymorphic arms.
-        for (FieldSpec pf : polyFields) {
+        for (FieldSpec pf : in.polyFields) {
             PolyDispatch d = ((Source.PolyChild) pf.source()).dispatch();
             if (d instanceof PolyDispatch.Tag tag) {
                 for (TagVariant v : tag.variants()) {
-                    String prefix = first ? "if " : "else if ";
-                    first = false;
-                    cb.add("$L($S.equals($L) && $L) {\n", prefix, v.local(), lnVar, nsMatchExprVar(v.ns(), nsVar)).indent();
-                    emitPolyAssign(cb, pf, v.subtypeFq(), registry);
-                    cb.unindent().add("}\n");
+                    first = emitQNameArm(cb, first, v.local(), v.ns(), in.lnVar, in.nsVar,
+                            () -> emitPolyAssign(cb, pf, v.subtypeFq(), registry));
                 }
             } else if (d instanceof PolyDispatch.Attr ad) {
-                String prefix = first ? "if " : "else if ";
-                first = false;
-                cb.add("$L($S.equals($L) && $L) {\n", prefix, ad.wrapLocal(), lnVar, nsMatchExprVar(ad.wrapNs(), nsVar)).indent();
-                emitPolyAttrSwitch(cb, pf, ad, registry);
-                cb.unindent().add("}\n");
+                first = emitQNameArm(cb, first, ad.wrapLocal(), ad.wrapNs(), in.lnVar, in.nsVar,
+                        () -> emitPolyAttrSwitch(cb, pf, ad, registry));
             }
         }
         // Descendant heads as direct matches.
-        for (var entry : byHead.entrySet()) {
+        for (var entry : in.byHead.entrySet()) {
             QKey head = entry.getKey();
-            String prefix = first ? "if " : "else if ";
-            first = false;
-            cb.add("$L($S.equals($L) && $L) {\n", prefix, head.local(), lnVar, nsMatchExprVar(head.ns(), nsVar)).indent();
-            emitDescendantArm(cb, head, entry.getValue(), tailTries, registry, converterRefs, /*terminating=*/false);
-            cb.unindent().add("}\n");
+            List<DescendantBranch> branches = entry.getValue();
+            first = emitQNameArm(cb, first, head.local(), head.ns(), in.lnVar, in.nsVar,
+                    () -> emitDescendantArm(cb, head, branches, in.tailTries, registry, converterRefs, /*terminating=*/false));
         }
         // Else: descendant scan or skipChild.
-        if (byHead.isEmpty()) {
+        if (in.byHead.isEmpty()) {
             if (first) {
-                cb.addStatement("c.skipChild()");
+                cb.addStatement(SKIP_CHILD);
             } else {
-                cb.add("else {\n").indent();
-                cb.addStatement("c.skipChild()");
+                cb.add(ELSE).indent();
+                cb.addStatement(SKIP_CHILD);
                 cb.unindent().add("}\n");
             }
         } else {
-            cb.add("else {\n").indent();
+            cb.add(ELSE).indent();
             cb.add("$T.forEachDescendantInChild(c, (dln, dns) -> {\n", CN_ADAPTER).indent();
             boolean dfirst = true;
-            for (var entry : byHead.entrySet()) {
+            for (var entry : in.byHead.entrySet()) {
                 QKey head = entry.getKey();
-                String prefix = dfirst ? "if " : "else if ";
-                dfirst = false;
-                cb.add("$L($S.equals(dln) && $L) {\n", prefix, head.local(),
-                        nsMatchExprVar(head.ns(), "dns")).indent();
-                emitDescendantArm(cb, head, entry.getValue(), tailTries, registry, converterRefs, /*terminating=*/true);
-                cb.unindent().add("}\n");
+                List<DescendantBranch> branches = entry.getValue();
+                dfirst = emitQNameArm(cb, dfirst, head.local(), head.ns(), "dln", "dns",
+                        () -> emitDescendantArm(cb, head, branches, in.tailTries, registry, converterRefs, /*terminating=*/true));
             }
             cb.add("return false;\n");
             cb.unindent().add("});\n");
@@ -481,7 +473,9 @@ final class Emitter {
         }
     }
 
-    /** One arm of the descendant dispatch — head matched, walk tail or read leaf. */
+    /**
+     * One arm of the descendant dispatch — head matched, walk tail or read leaf.
+     */
     @SuppressWarnings("StatementWithEmptyBody")
     private void emitDescendantArm(CodeBlock.Builder cb,
                                    QKey head,
@@ -502,23 +496,23 @@ final class Emitter {
         TailTrie tail = tailTries.get(head);
         if (guarded.isEmpty()) {
             emitDescendantArmBody(cb, head, unguarded, tail, registry, converterRefs);
-            if (terminating) cb.add("return true;\n");
+            if (terminating) cb.addStatement(RETURN_TRUE);
             return;
         }
         boolean first = true;
         for (DescendantBranch entry : guarded) {
-            String prefix = first ? "if " : "else if ";
+            String prefix = first ? "if " : ELSE_IF;
             first = false;
             CodeBlock cond = predicateExpr(entry.brackets(), head, new SlotTable());
             cb.add("$L($L) {\n", prefix, cond).indent();
             emitDescendantArmBody(cb, head, List.of(entry.field()), tail, registry, converterRefs);
-            if (terminating) cb.add("return true;\n");
+            if (terminating) cb.addStatement(RETURN_TRUE);
             cb.unindent().add("}\n");
         }
         if (!unguarded.isEmpty()) {
-            cb.add("else {\n").indent();
+            cb.add(ELSE).indent();
             emitDescendantArmBody(cb, head, unguarded, tail, registry, converterRefs);
-            if (terminating) cb.add("return true;\n");
+            if (terminating) cb.addStatement(RETURN_TRUE);
             cb.unindent().add("}\n");
         } else if (terminating) {
             // No matching predicate variant: fall through, do not consume.
@@ -550,7 +544,9 @@ final class Emitter {
         }
     }
 
-    /** Read a single leaf (head=field) inline at descendant matching site. */
+    /**
+     * Read a single leaf (head=field) inline at descendant matching site.
+     */
     private void emitLeafReadInline(CodeBlock.Builder cb, FieldSpec f,
                                     NestedRegistry registry) {
         if (f.coerce() instanceof Coerce.Nested n) {
@@ -572,7 +568,9 @@ final class Emitter {
         }
     }
 
-    /** Walk a trie at a non-root node — at the cursor's current child element. */
+    /**
+     * Walk a trie at a non-root node — at the cursor's current child element.
+     */
     private void emitChildBody(CodeBlock.Builder cb, TrieNode node,
                                NestedRegistry registry,
                                Map<String, ConverterRef> converterRefs) {
@@ -580,7 +578,9 @@ final class Emitter {
         emitChildBodyContent(cb, node, registry, converterRefs);
     }
 
-    /** Pure attr reads — safe to run multiple times for overlapping predicate variants. */
+    /**
+     * Pure attr reads — safe to run multiple times for overlapping predicate variants.
+     */
     private void emitAttrEntries(CodeBlock.Builder cb, TrieNode node) {
         for (AttrEntry ae : node.attrEntries()) {
             FieldSpec f = ae.field();
@@ -600,10 +600,14 @@ final class Emitter {
         }
     }
 
-    /** Per-emitter counter for nested lambda variable names — Java forbids shadowing. */
+    /**
+     * Per-emitter counter for nested lambda variable names — Java forbids shadowing.
+     */
     private int lambdaDepth = 0;
 
-    /** Body-consuming dispatch — text / nested / descend. Caller decides whether to gate it. */
+    /**
+     * Body-consuming dispatch — text / nested / descend. Caller decides whether to gate it.
+     */
     @SuppressWarnings("StatementWithEmptyBody")
     private void emitChildBodyContent(CodeBlock.Builder cb, TrieNode node,
                                       NestedRegistry registry,
@@ -660,13 +664,13 @@ final class Emitter {
                                     Map<String, ConverterRef> converterRefs,
                                     String lnVar, String nsVar) {
         if (node.children().isEmpty()) {
-            cb.addStatement("c.skipChild()");
+            cb.addStatement(SKIP_CHILD);
             return;
         }
         emitGroupedChildArms(cb, node.groupChildrenByQKey(), true,
                 slots, registry, converterRefs, lnVar, nsVar);
-        cb.add("else {\n").indent();
-        cb.addStatement("c.skipChild()");
+        cb.add(ELSE).indent();
+        cb.addStatement(SKIP_CHILD);
         cb.unindent().add("}\n");
     }
 
@@ -687,18 +691,20 @@ final class Emitter {
                 ClassName.get(String.class), f.name(), nsLiteral(d.attrNs()), d.attrLocal());
         boolean first = true;
         for (AttrVariant v : d.variants()) {
-            String prefix = first ? "if " : "else if ";
+            String prefix = first ? "if " : ELSE_IF;
             first = false;
             cb.add("$L($T.equals(__disc_$L, $S)) {\n", prefix, CN_OBJECTS, f.name(), v.value()).indent();
             emitPolyAssign(cb, f, v.subtypeFq(), registry);
             cb.unindent().add("}\n");
         }
-        cb.add("else {\n").indent();
-        cb.addStatement("c.skipChild()");
+        cb.add(ELSE).indent();
+        cb.addStatement(SKIP_CHILD);
         cb.unindent().add("}\n");
     }
 
-    /** Build map entry: read key + value via synthetic specs, then store in __map_X. */
+    /**
+     * Build map entry: read key + value via synthetic specs, then store in __map_X.
+     */
     private void emitMapEntryCase(CodeBlock.Builder cb, FieldSpec f,
                                   MapPlan mp,
                                   NestedRegistry registry,
@@ -755,13 +761,12 @@ final class Emitter {
     private void emitMapEntrySwitch(CodeBlock.Builder cb, MapPlan mp,
                                     NestedRegistry registry,
                                     Map<String, ConverterRef> converterRefs) {
-        emitChildSwitchCore(cb, mp.directRoot(), mp.slots(),
-                mp.descendantByHead(), mp.tailTries(),
-                java.util.Collections.emptyMap(), java.util.Collections.emptyList(),
-                registry, converterRefs, "mln", "mns");
+        emitChildSwitchCore(cb, ChildSwitchInputs.from(mp, "mln", "mns"), registry, converterRefs);
     }
 
-    /** Emits {@code final T __final_name = ...;} for one field. */
+    /**
+     * Emits {@code final T __final_name = ...;} for one field.
+     */
     private CodeBlock coerceField(FieldSpec f,
                                   Map<String, ConverterRef> converterRefs) {
         CodeBlock.Builder cb = CodeBlock.builder();
@@ -889,7 +894,9 @@ final class Emitter {
         return CodeBlock.of("($S.equals($L) || c.getIgnoreNamespace())", ns, var);
     }
 
-    /** Emits {@code int[] __cnt_<slot> = new int[]{0};} declarations for the precomputed slots. */
+    /**
+     * Emits {@code int[] __cnt_<slot> = new int[]{0};} declarations for the precomputed slots.
+     */
     private void declareSlotsCode(CodeBlock.Builder cb, SlotTable slots) {
         for (var e : slots) {
             cb.addStatement("final int[] __cnt_$L = new int[]{0}", e.getValue());
@@ -910,7 +917,7 @@ final class Emitter {
                                          String lnVar, String nsVar) {
         for (var entry : grouped.entrySet()) {
             QKey key = entry.getKey();
-            String prefix = first ? "if " : "else if ";
+            String prefix = first ? "if " : ELSE_IF;
             first = false;
             cb.add("$L($S.equals($L) && $L) {\n", prefix, key.local(), lnVar, nsMatchExprVar(key.ns(), nsVar)).indent();
             emitPredicateBranches(cb, key, entry.getValue(), slots, registry, converterRefs);
@@ -921,13 +928,13 @@ final class Emitter {
 
     /**
      * Two-pass dispatch when predicate variants overlap on the same element:
-     *  1. attr-only reads run for EVERY matching predicate (childAttr is a pure lookup, no
-     *     element consumption). Without this, paths like
-     *       link[@type='epub']/@href
-     *       link[@type='epub'][@rel='acq']/@href
-     *     would race and only the first matching arm would fire.
-     *  2. Body-consuming variants (text / nested / descend) dispatch first-match-wins —
-     *     a single element body can only be consumed once.
+     * 1. attr-only reads run for EVERY matching predicate (childAttr is a pure lookup, no
+     * element consumption). Without this, paths like
+     * link[@type='epub']/@href
+     * link[@type='epub'][@rel='acq']/@href
+     * would race and only the first matching arm would fire.
+     * 2. Body-consuming variants (text / nested / descend) dispatch first-match-wins —
+     * a single element body can only be consumed once.
      */
     private void emitPredicateBranches(CodeBlock.Builder cb,
                                        QKey qkey,
@@ -974,21 +981,21 @@ final class Emitter {
             if (entry.getValue().hasBodyContent()) bodyBranches.add(entry);
         }
         if (bodyBranches.isEmpty()) {
-            cb.addStatement("c.skipChild()");
+            cb.addStatement(SKIP_CHILD);
             return;
         }
         boolean first = true;
         for (var entry : bodyBranches) {
             List<Predicate> brackets = entry.getKey();
-            String prefix = first ? "if " : "else if ";
+            String prefix = first ? "if " : ELSE_IF;
             first = false;
             CodeBlock cond = predicateExpr(brackets, qkey, slots);
             cb.add("$L($L) {\n", prefix, cond).indent();
             emitChildBodyContent(cb, entry.getValue(), registry, converterRefs);
             cb.unindent().add("}\n");
         }
-        cb.add("else {\n").indent();
-        cb.addStatement("c.skipChild()");
+        cb.add(ELSE).indent();
+        cb.addStatement(SKIP_CHILD);
         cb.unindent().add("}\n");
     }
 
@@ -1008,7 +1015,10 @@ final class Emitter {
         }
         int firstIdxIndex = -1;
         for (int i = 0; i < brackets.size(); i++) {
-            if (PredicateAnalysis.containsIndex(brackets.get(i))) { firstIdxIndex = i; break; }
+            if (PredicateAnalysis.containsIndex(brackets.get(i))) {
+                firstIdxIndex = i;
+                break;
+            }
         }
         if (firstIdxIndex < 0) {
             throw new IllegalStateException("predicateExpr called with no Index in brackets — bug in bracketsHaveIndex");

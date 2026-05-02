@@ -5,20 +5,12 @@ import org.jspecify.annotations.Nullable;
 import xmlfluss.codegen.model.TypeRef;
 import xmlfluss.codegen.spi.TypeSymbol;
 
-import javax.lang.model.element.Element;
-import javax.lang.model.element.ElementKind;
-import javax.lang.model.element.ExecutableElement;
-import javax.lang.model.element.Modifier;
-import javax.lang.model.element.TypeElement;
+import javax.lang.model.element.*;
 import javax.lang.model.type.DeclaredType;
 import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
 import javax.lang.model.util.Types;
-import java.util.ArrayDeque;
-import java.util.Deque;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 
 /**
  * APT-side {@link TypeSymbol} backed by a live {@link TypeElement}. Used by

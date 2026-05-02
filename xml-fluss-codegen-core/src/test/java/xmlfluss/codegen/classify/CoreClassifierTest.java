@@ -1,22 +1,8 @@
 package xmlfluss.codegen.classify;
 
 import org.junit.jupiter.api.Test;
-import xmlfluss.codegen.model.AttrVariant;
-import xmlfluss.codegen.model.Coerce;
-import xmlfluss.codegen.model.FieldSpec;
-import xmlfluss.codegen.model.PathSeg;
-import xmlfluss.codegen.model.PolyDispatch;
-import xmlfluss.codegen.model.RecordSpec;
-import xmlfluss.codegen.model.ScalarKind;
-import xmlfluss.codegen.model.Source;
-import xmlfluss.codegen.model.TagVariant;
-import xmlfluss.codegen.model.TypeRef;
-import xmlfluss.codegen.spi.FakeAnnotationView;
-import xmlfluss.codegen.spi.FakeComponentSymbol;
-import xmlfluss.codegen.spi.FakeDiagnosticReporter;
-import xmlfluss.codegen.spi.FakeRecordSymbol;
-import xmlfluss.codegen.spi.FakeSymbolProvider;
-import xmlfluss.codegen.spi.FakeTypeSymbol;
+import xmlfluss.codegen.model.*;
+import xmlfluss.codegen.spi.*;
 
 import java.util.List;
 import java.util.Map;
@@ -466,14 +452,6 @@ class CoreClassifierTest {
     // ================================================================== @XmlChild tests
 
     private static final String FQ_XML_CHILD = CoreClassifier.FQ_XML_CHILD;
-
-    /** Component with @XmlChild using the component name (no explicit path). */
-    private static FakeComponentSymbol childComponent(String name, TypeRef type, boolean nullable) {
-        FakeAnnotationView ann = FakeAnnotationView.builder()
-                .annotation(FQ_XML_CHILD)
-                .build();
-        return new FakeComponentSymbol(name, type, nullable, false, type, null, ann, "handle-" + name);
-    }
 
     /** Component with @XmlChild and explicit path override. */
     private static FakeComponentSymbol childComponentWithPath(String name, String path,
@@ -1603,22 +1581,23 @@ class CoreClassifierTest {
 
     /**
      * Builds the owning record with a polymorphic field named {@code fieldName} typed as
-     * {@code parentFq}.  The component carries {@code @XmlChild} (optionally with a path).
+     * {@code parentFq}. The component carries {@code @XmlChild} (optionally with a path).
+     *
+     * @param path null or empty for {@code @XmlChild} with no path; non-empty for an explicit path.
      */
-    /** @param path null or empty for @XmlChild with no path; non-empty for an explicit path. */
-    private static FakeComponentSymbol polyChildComponent(String fieldName, FakeRecordSymbol parent,
-                                                           String path) {
+    private static FakeComponentSymbol polyChildComponent(FakeRecordSymbol parent,
+                                                          String path) {
         TypeRef parentType = TypeRef.of(parent.packageName(), parent.simpleName());
         FakeAnnotationView.Builder b = FakeAnnotationView.builder();
-        if (path == null || path.isEmpty()) {
+        if (path.isEmpty()) {
             b.annotation(FQ_XML_CHILD);
         } else {
             b.string(FQ_XML_CHILD, "path", path);
         }
         FakeAnnotationView ann = b.build();
         return new FakeComponentSymbol(
-                fieldName, parentType, false, false, parentType, null, ann,
-                "handle-" + fieldName);
+                "pet", parentType, false, false, parentType, null, ann,
+                "handle-" + "pet");
     }
 
     // ------------------------------------------------------------------ Tag-mode polymorphic (happy path)
@@ -1629,7 +1608,7 @@ class CoreClassifierTest {
         FakeRecordSymbol dog = subtype("com.example.Dog", "dog");
         FakeRecordSymbol animal = polyParent("com.example.Animal", "", List.of(cat, dog));
 
-        FakeComponentSymbol petField = polyChildComponent("pet", animal, null);
+        FakeComponentSymbol petField = polyChildComponent(animal, null);
         FakeRecordSymbol owner = simpleRecord(petField);
 
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();
@@ -1675,7 +1654,7 @@ class CoreClassifierTest {
         FakeRecordSymbol dog = subtype("com.example.Dog", "dog");
         FakeRecordSymbol animal = polyParent("com.example.Animal", "@kind", List.of(cat, dog));
 
-        FakeComponentSymbol petField = polyChildComponent("pet", animal, "entry");
+        FakeComponentSymbol petField = polyChildComponent(animal, "entry");
         FakeRecordSymbol owner = simpleRecord(petField);
 
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();
@@ -1772,7 +1751,7 @@ class CoreClassifierTest {
         FakeRecordSymbol cat = subtype("com.example.Cat", "cat");
         FakeRecordSymbol animal = polyParent("com.example.Animal", "", List.of(cat));
 
-        FakeComponentSymbol c = polyChildComponent("pet", animal, "wrapper");
+        FakeComponentSymbol c = polyChildComponent(animal, "wrapper");
         FakeRecordSymbol owner = simpleRecord(c);
 
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();
@@ -1795,7 +1774,7 @@ class CoreClassifierTest {
         FakeRecordSymbol animal = polyParent("com.example.Animal", "@kind", List.of(cat));
 
         // No path on @XmlChild
-        FakeComponentSymbol c = polyChildComponent("pet", animal, null);
+        FakeComponentSymbol c = polyChildComponent(animal, null);
         FakeRecordSymbol owner = simpleRecord(c);
 
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();
@@ -1817,7 +1796,7 @@ class CoreClassifierTest {
         FakeRecordSymbol cat = subtype("com.example.Cat", "cat");
         FakeRecordSymbol animal = polyParent("com.example.Animal", "kind", List.of(cat));
 
-        FakeComponentSymbol c = polyChildComponent("pet", animal, "entry");
+        FakeComponentSymbol c = polyChildComponent(animal, "entry");
         FakeRecordSymbol owner = simpleRecord(c);
 
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();
@@ -1841,7 +1820,7 @@ class CoreClassifierTest {
         FakeRecordSymbol dog = subtype("com.example.Dog", "animal");
         FakeRecordSymbol animal = polyParent("com.example.Animal", "", List.of(cat, dog));
 
-        FakeComponentSymbol c = polyChildComponent("pet", animal, null);
+        FakeComponentSymbol c = polyChildComponent(animal, null);
         FakeRecordSymbol owner = simpleRecord(c);
 
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();
@@ -1868,7 +1847,7 @@ class CoreClassifierTest {
                 "handle-Cat");
         FakeRecordSymbol animal = polyParent("com.example.Animal", "", List.of(cat));
 
-        FakeComponentSymbol c = polyChildComponent("pet", animal, null);
+        FakeComponentSymbol c = polyChildComponent(animal, null);
         FakeRecordSymbol owner = simpleRecord(c);
 
         FakeDiagnosticReporter diag = new FakeDiagnosticReporter();

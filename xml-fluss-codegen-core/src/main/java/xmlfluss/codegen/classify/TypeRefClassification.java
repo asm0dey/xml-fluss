@@ -12,6 +12,9 @@ import java.util.Map;
  */
 public final class TypeRefClassification {
 
+    public static final String JAVA_TIME = "java.time";
+    public static final String JAVA_LANG = "java.lang";
+
     private TypeRefClassification() {}
 
     private static final Map<String, ScalarKind> SCALAR_BY_FQN = Map.ofEntries(
@@ -91,15 +94,15 @@ public final class TypeRefClassification {
 
     public static TypeRef boxedScalar(ScalarKind kind) {
         return switch (kind) {
-            case STRING -> TypeRef.of("java.lang", "String");
-            case INT -> TypeRef.of("java.lang", "Integer");
-            case LONG -> TypeRef.of("java.lang", "Long");
-            case DOUBLE -> TypeRef.of("java.lang", "Double");
-            case BOOLEAN -> TypeRef.of("java.lang", "Boolean");
+            case STRING -> TypeRef.of(JAVA_LANG, "String");
+            case INT -> TypeRef.of(JAVA_LANG, "Integer");
+            case LONG -> TypeRef.of(JAVA_LANG, "Long");
+            case DOUBLE -> TypeRef.of(JAVA_LANG, "Double");
+            case BOOLEAN -> TypeRef.of(JAVA_LANG, "Boolean");
             case BIG_DECIMAL -> TypeRef.of("java.math", "BigDecimal");
-            case LOCAL_DATE -> TypeRef.of("java.time", "LocalDate");
-            case LOCAL_DATE_TIME -> TypeRef.of("java.time", "LocalDateTime");
-            case INSTANT -> TypeRef.of("java.time", "Instant");
+            case LOCAL_DATE -> TypeRef.of(JAVA_TIME, "LocalDate");
+            case LOCAL_DATE_TIME -> TypeRef.of(JAVA_TIME, "LocalDateTime");
+            case INSTANT -> TypeRef.of(JAVA_TIME, "Instant");
         };
     }
 }

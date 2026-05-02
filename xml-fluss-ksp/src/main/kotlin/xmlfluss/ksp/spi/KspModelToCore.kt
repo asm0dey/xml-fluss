@@ -5,6 +5,8 @@ import com.google.devtools.ksp.symbol.KSType
 import com.google.devtools.ksp.symbol.Variance
 import xmlfluss.codegen.model.TypeRef
 
+private const val JAVA_LANG_PKG = "java.lang"
+
 /** Maps a [KSType] (after `resolve()`) to a neutral [TypeRef]. */
 internal object KspModelToCore {
 
@@ -37,11 +39,11 @@ internal object KspModelToCore {
         if (fqn in PRIMITIVE_FQNS) {
             return TypeRef.ofPrimitive(PRIMITIVE_SIMPLE.getValue(fqn))
         }
-        if (fqn == "kotlin.String") return TypeRef.of("java.lang", "String")
+        if (fqn == "kotlin.String") return TypeRef.of(JAVA_LANG_PKG, "String")
         if (fqn == "kotlin.collections.List") {
             val args = type.arguments.map { arg ->
                 arg.type?.resolve()?.let { toTypeRef(it) }
-                    ?: TypeRef.of("java.lang", "Object")
+                    ?: TypeRef.of(JAVA_LANG_PKG, "Object")
             }
             return TypeRef.parameterized("java.util", "List", args)
         }
@@ -51,7 +53,7 @@ internal object KspModelToCore {
         if (fqn == "kotlin.collections.Map") {
             val args = type.arguments.map { arg ->
                 arg.type?.resolve()?.let { toTypeRef(it) }
-                    ?: TypeRef.of("java.lang", "Object")
+                    ?: TypeRef.of(JAVA_LANG_PKG, "Object")
             }
             return TypeRef.parameterized("java.util", "Map", args)
         }
@@ -70,9 +72,9 @@ internal object KspModelToCore {
         if (type.arguments.isEmpty()) return TypeRef.of(pkg, simple)
         val args = type.arguments.map { arg ->
             when (arg.variance) {
-                Variance.STAR -> TypeRef.of("java.lang", "Object")
+                Variance.STAR -> TypeRef.of(JAVA_LANG_PKG, "Object")
                 else -> arg.type?.resolve()?.let { toTypeRef(it) }
-                    ?: TypeRef.of("java.lang", "Object")
+                    ?: TypeRef.of(JAVA_LANG_PKG, "Object")
             }
         }
         return TypeRef.parameterized(pkg, simple, args)

@@ -5,7 +5,12 @@ import javax.tools.JavaCompiler;
 import javax.tools.JavaFileObject;
 import javax.tools.SimpleJavaFileObject;
 import javax.tools.ToolProvider;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Comparator;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -57,15 +62,40 @@ final class SpiTestHarness {
 
     private static void run(List<JavaFileObject> sources, List<AbstractProcessor> processors, String procMode) {
         JavaCompiler javac = ToolProvider.getSystemJavaCompiler();
-        List<String> options = List.of(
-                "-classpath", System.getProperty("java.class.path"),
-                procMode,
-                "--release", "17"
-        );
-        var task = javac.getTask(null, null, null, options, null, sources);
-        task.setProcessors(processors);
-        boolean ok = task.call();
-        assertTrue(ok, "javac should succeed");
+        Path out;
+        try {
+            out = Files.createTempDirectory("xmlfluss-apt-test-");
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        try {
+            List<String> options = List.of(
+                    "-classpath", System.getProperty("java.class.path"),
+                    procMode,
+                    "--release", "17",
+                    "-d", out.toString(),
+                    "-s", out.toString()
+            );
+            var task = javac.getTask(null, null, null, options, null, sources);
+            task.setProcessors(processors);
+            boolean ok = task.call();
+            assertTrue(ok, "javac should succeed");
+        } finally {
+            deleteTree(out);
+        }
+    }
+
+    private static void deleteTree(Path root) {
+        if (!Files.exists(root)) return;
+        try (var s = Files.walk(root)) {
+            s.sorted(Comparator.reverseOrder()).forEach(p -> {
+                try {
+                    Files.deleteIfExists(p);
+                } catch (IOException ignored) {
+                }
+            });
+        } catch (IOException ignored) {
+        }
     }
 
     /**

@@ -16,10 +16,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 import static xmlfluss.apt.spi.SpiTestHarness.compileWith;
 import static xmlfluss.apt.spi.SpiTestHarness.source;
 
@@ -67,6 +64,38 @@ class AptSymbolProviderTest {
         assertEquals("java.util.List", items.type().qualifiedName());
         assertEquals("java.lang.String", items.elementType().qualifiedName());
         assertEquals("item", items.annotations().stringValue("xmlfluss.XmlChild", "path"));
+    }
+
+    @Test
+    void nullable_picksUpAnnotationOnExplicitCanonicalCtorParam() {
+        AtomicReference<@Nullable RecordSymbol> captured = new AtomicReference<>();
+
+        AbstractProcessor proc = new SymbolCapturingProcessor("p.Demo", captured);
+
+        // Plain package (no @NullMarked) → unannotated reference-type components are nullable by
+        // default. The component declaration carries no JSpecify annotation; the only @NonNull is
+        // on the explicit canonical-ctor parameter. Without the ctor-param walk, this would fall
+        // through to the scope default (nullable=true). With the walk, the @NonNull is honoured.
+        JavaFileObject src = source("p/Demo",
+                """
+                        package p;
+                        import org.jspecify.annotations.NonNull;
+                        import xmlfluss.XmlRecord;
+                        import xmlfluss.XmlAttr;
+                        @XmlRecord(path = "demo")
+                        public record Demo(@XmlAttr(name = "id") String id) {
+                            public Demo(@NonNull String id) { this.id = id; }
+                        }
+                        """);
+
+        compileWith(List.of(src), List.of(proc));
+
+        RecordSymbol r = captured.get();
+        assertNotNull(r, "processor should have been invoked");
+        assertEquals(1, r.components().size());
+        var id = r.components().get(0);
+        assertEquals("id", id.name());
+        assertFalse(id.nullable(), "@NonNull on explicit canonical-ctor param must force non-null");
     }
 
     @SupportedAnnotationTypes("xmlfluss.XmlRecord")

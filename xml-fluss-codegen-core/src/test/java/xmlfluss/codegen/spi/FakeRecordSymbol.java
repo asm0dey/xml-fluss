@@ -3,11 +3,7 @@ package xmlfluss.codegen.spi;
 import org.jspecify.annotations.Nullable;
 import xmlfluss.codegen.model.PolyDispatch;
 
-import java.util.Collections;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 
 public record FakeRecordSymbol(
         String packageName,

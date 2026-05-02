@@ -26,6 +26,10 @@ private const val XMLFLUSS_RUNTIME = "xmlfluss.runtime"
 private const val SKIP_CHILD = "c.skipChild()\n"
 private const val ELSE_SKIP_CHILD = "else -> $SKIP_CHILD"
 
+private const val TRUE_NL = "true\n"
+
+private const val KOTLIN_COLLECTIONS_PKG = "kotlin.collections"
+
 /**
  * KSP processor that turns `@XmlRecord` data classes into streaming parsers.
  *
@@ -576,7 +580,7 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
                 }
             }
             hasText -> {
-                val textFields = node.textEntries()
+                val textFields = node.textEntries().toList()
                 val needLoc = textFields.any { needsChildLoc(it) }
                 if (needLoc) cb.add("val __t_loc·=·c.childLocation()\n")
                 cb.add("val __t = c.childText(false)\n")
@@ -808,20 +812,20 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         val tail = tailTries[head]
         if (guarded.isEmpty()) {
             emitDescendantArmBody(cb, head, unguarded, tail, registry)
-            if (terminating) cb.add("true\n")
+            if (terminating) cb.add(TRUE_NL)
             return
         }
         cb.beginControlFlow("when")
         for (b in guarded) {
             cb.beginControlFlow("%L ->", predicateExpr(b.brackets(), head, SlotTable()))
             emitDescendantArmBody(cb, head, listOf(b.field()), tail, registry)
-            if (terminating) cb.add("true\n")
+            if (terminating) cb.add(TRUE_NL)
             cb.endControlFlow()
         }
         if (unguarded.isNotEmpty()) {
             cb.beginControlFlow("else ->")
             emitDescendantArmBody(cb, head, unguarded, tail, registry)
-            if (terminating) cb.add("true\n")
+            if (terminating) cb.add(TRUE_NL)
             cb.endControlFlow()
         } else {
             cb.add("else -> ")
@@ -1083,9 +1087,9 @@ class XmlDslProcessor(env: SymbolProcessorEnvironment) : SymbolProcessor {
         val COMPILED_PATH = ClassName("xmlfluss.path", "CompiledPath")
         val PATHS_COMPILE = MemberName(ClassName(XMLFLUSS_RUNTIME, "Paths"), "compile")
         val MISSING_EX = ClassName("xmlfluss", "XmlParseException", "Missing")
-        val MUTABLE_LIST = ClassName("kotlin.collections", "MutableList")
-        val MUTABLE_MAP = ClassName("kotlin.collections", "MutableMap")
-        val LINKED_MAP_OF = MemberName("kotlin.collections", "linkedMapOf")
+        val MUTABLE_LIST = ClassName(KOTLIN_COLLECTIONS_PKG, "MutableList")
+        val MUTABLE_MAP = ClassName(KOTLIN_COLLECTIONS_PKG, "MutableMap")
+        val LINKED_MAP_OF = MemberName(KOTLIN_COLLECTIONS_PKG, "linkedMapOf")
         val LOCATION = ClassName("xmlfluss", "Location")
         val LOCATION_NULLABLE = LOCATION.copy(nullable = true)
 

@@ -1,29 +1,13 @@
 package xmlfluss.codegen.classify;
 
 import org.jspecify.annotations.Nullable;
-import xmlfluss.codegen.model.Coerce;
-import xmlfluss.codegen.model.FieldSpec;
-import xmlfluss.codegen.model.NestedRegistry;
-import xmlfluss.codegen.model.PathSeg;
-import xmlfluss.codegen.model.RecordSpec;
-import xmlfluss.codegen.model.ScalarKind;
-import xmlfluss.codegen.model.Source;
-import xmlfluss.codegen.model.TypeRef;
+import xmlfluss.codegen.model.*;
+import xmlfluss.codegen.plan.TrieNode;
 import xmlfluss.codegen.spi.ComponentSymbol;
 import xmlfluss.codegen.spi.RecordSymbol;
 import xmlfluss.codegen.spi.SymbolProvider;
 import xmlfluss.codegen.spi.TypeSymbol;
-import xmlfluss.path.CompiledPath;
-import xmlfluss.path.PathParseException;
-import xmlfluss.path.PathParser;
-import xmlfluss.path.Step;
-
-import xmlfluss.codegen.model.AttrVariant;
-import xmlfluss.codegen.model.PolyDispatch;
-import xmlfluss.codegen.model.QKey;
-import xmlfluss.codegen.model.TagVariant;
-import xmlfluss.codegen.plan.TrieNode;
-import xmlfluss.path.Predicate;
+import xmlfluss.path.*;
 
 import java.util.*;
 
@@ -45,6 +29,27 @@ public final class CoreClassifier {
     static final String FQ_CONVERTER       = "xmlfluss.Converter";
     static final String FQ_XML_POLYMORPHIC = "xmlfluss.XmlPolymorphic";
     static final String FQ_XML_SUBTYPE     = "xmlfluss.XmlSubtype";
+    public static final String ON_FIELD = "' on field '";
+    public static final String XML_CHILD = "@XmlChild";
+    public static final String CLASHES_WITH_A_DESCENDANT_XML_CHILD = "' clashes with a descendant " + XML_CHILD + "('//";
+    public static final String HEAD = "') head";
+    public static final String XML_CONVERTER = "@XmlConverter";
+    public static final String XML_FORMAT = "@XmlFormat";
+    public static final String XML_FORMAT_AND_XML_CONVERTER_ARE_MUTUALLY_EXCLUSIVE_ON = XML_FORMAT + " and " + XML_CONVERTER + " are mutually exclusive on '";
+    public static final String POLYMORPHIC_FIELD = "polymorphic field '";
+    public static final String SUBTYPE = "': subtype ";
+    public static final String JAVA_UTIL_PACKAGE = "java.util";
+    public static final String GOT = "', got ";
+    public static final String ON = " on '";
+    public static final String XML_FORMAT_ON = XML_FORMAT + ON;
+    public static final String PATTERN = "pattern";
+    public static final String FOR = "' for '";
+    public static final String XML_MAP = "@XmlMap";
+    public static final String OF = "' of '";
+    public static final String ENTRY = " entry '";
+    public static final String PATH = " path '";
+    public static final String CLASHES_WITH_ANOTHER = "' clashes with another ";
+    public static final String NOT_SUPPORTED_ON_POLYMORPHIC_FIELD = " not supported on polymorphic field '";
 
     // ------------------------------------------------------------------ inner helpers
 
@@ -63,6 +68,14 @@ public final class CoreClassifier {
 
     /** Coerce + boxed/elem type-name triple for scalar/text/attr fields. */
     private record ScalarBundle(TypeRef boxedTypeName, TypeRef elemTypeName, String elemFq, Coerce coerce) {}
+
+    /** Mutable state shared across one record's component classification pass. */
+    private static final class ComponentCtx {
+        final List<FieldSpec> fields = new ArrayList<>();
+        final Set<String> seenAttrKeys = new HashSet<>();
+        final Map<String, String> firstAttrBindingByKey = new HashMap<>();
+        int textCount = 0;
+    }
 
     // ------------------------------------------------------------------ fields
 
@@ -96,180 +109,19 @@ public final class CoreClassifier {
      * top (nested overrides outer for the same prefix).
      */
     private @Nullable RecordSpec classifyOne(RecordSymbol record, Map<String, String> inheritedNs) {
-
         // Merge inherited namespaces with this record's own declarations (own overrides inherited)
         Map<String, String> nsMap = new LinkedHashMap<>(inheritedNs);
         nsMap.putAll(record.declaredNamespaces());
 
         String declaredPath = record.declaredPath();
         String recordPath = declaredPath != null ? declaredPath : "";
+        if (!validateRecordPath(record, recordPath, nsMap)) return null;
 
-        // Eagerly validate the @XmlRecord(path=...) string against the runtime path parser so
-        // syntax errors surface as a single ERROR diagnostic instead of as a stack trace at
-        // emit time. Mirrors original Classifier.classifyTopLevel lines 74-81.
-        if (!recordPath.isEmpty()) {
-            try {
-                xmlfluss.runtime.Paths.INSTANCE.compile(recordPath, nsMap);
-            } catch (RuntimeException ex) {
-                sp.diagnostics().error(record.nativeHandle(),
-                        "@XmlRecord path '" + recordPath + "' is invalid: " + ex.getMessage());
-                return null;
-            }
-        }
+        List<FieldSpec> fields = classifyComponents(record, nsMap);
+        if (fields == null) return null;
 
-        List<FieldSpec> fields = new ArrayList<>();
-        Set<String> seenAttrKeys = new HashSet<>();
-        Map<String, String> firstAttrBindingByKey = new HashMap<>();
-        boolean hadError = false;
-        int textCount = 0;
-
-        for (ComponentSymbol c : record.components()) {
-            boolean hasXmlAttr  = c.annotations().has(FQ_XML_ATTR);
-            boolean hasXmlChild = c.annotations().has(FQ_XML_CHILD);
-            boolean hasXmlText  = c.annotations().has(FQ_XML_TEXT);
-            boolean hasXmlMap   = c.annotations().has(FQ_XML_MAP);
-            String  cName       = c.name();
-
-            // Mutual exclusion: @XmlAttr / @XmlChild / @XmlText / @XmlMap
-            int bindings = (hasXmlAttr ? 1 : 0) + (hasXmlChild ? 1 : 0)
-                    + (hasXmlText ? 1 : 0) + (hasXmlMap ? 1 : 0);
-            if (bindings > 1) {
-                sp.diagnostics().error(c.nativeHandle(),
-                        "@XmlAttr / @XmlChild / @XmlText / @XmlMap are mutually exclusive on '"
-                                + cName + "'");
-                hadError = true;
-                continue;
-            }
-
-            // Reject nullable List fields. Kotlin lets users write `List<X>?`, but the parser
-            // contract is "no matches → empty list". A nullable list would require the parser
-            // to choose between null and an empty list, with no guidance from the source.
-            // Java records have no syntactic equivalent so APT doesn't trip this; CoreClassifier
-            // enforces it once for every host language.
-            if (c.isList() && c.nullable()) {
-                sp.diagnostics().error(c.nativeHandle(),
-                        "List field '" + cName + "' must not be nullable; use empty list");
-                hadError = true;
-                continue;
-            }
-
-            // Mutual exclusion: @XmlFormat and @XmlConverter (checked here so all branches enforce it)
-            boolean hasFormat    = c.annotations().has(FQ_XML_FORMAT);
-            boolean hasConverter = c.annotations().has(FQ_XML_CONVERTER);
-            if (hasFormat && hasConverter) {
-                sp.diagnostics().error(c.nativeHandle(),
-                        "@XmlFormat and @XmlConverter are mutually exclusive on '" + cName + "'");
-                hadError = true;
-                continue;
-            }
-
-            // Polymorphic dispatch: if the element type is a sealed parent annotated with
-            // @XmlPolymorphic, and @XmlChild is present, route to classifyPolymorphic.
-            // Mirror original Classifier.java lines 229-239.
-            TypeRef checkType = c.isList() ? c.elementType() : c.type();
-            RecordSymbol polyParent = sp.lookupRecord(checkType.qualifiedName());
-            boolean isPolyParent = polyParent != null
-                    && polyParent.annotations().has(FQ_XML_POLYMORPHIC);
-
-            if (isPolyParent && hasXmlChild) {
-                if (hasConverter) {
-                    sp.diagnostics().error(c.nativeHandle(),
-                            "@XmlConverter not supported on polymorphic field '" + cName + "'");
-                    hadError = true;
-                    continue;
-                }
-                FieldSpec spec = classifyPolymorphic(c, polyParent, nsMap);
-                if (spec == null) {
-                    hadError = true;
-                } else {
-                    fields.add(spec);
-                }
-                continue;
-            }
-            if (isPolyParent && hasConverter) {
-                sp.diagnostics().error(c.nativeHandle(),
-                        "@XmlConverter not supported on polymorphic field '" + cName + "'");
-                hadError = true;
-                continue;
-            }
-
-            if (hasXmlAttr) {
-                // ---- @XmlAttr branch ----
-                FieldSpec spec = classifyAttr(c, nsMap);
-                if (spec != null) {
-                    if (spec.source() instanceof Source.Attr attr) {
-                        String key = qnameKey(attr.ns(), attr.name());
-                        if (!seenAttrKeys.add(key)) {
-                            String first = firstAttrBindingByKey.get(key);
-                            sp.diagnostics().error(c.nativeHandle(),
-                                    "duplicate @XmlAttr name '" + attr.name() + "': '"
-                                            + first + "' and '" + spec.name() + "' both bind it");
-                            hadError = true;
-                            continue;
-                        }
-                        firstAttrBindingByKey.put(key, spec.name());
-                    }
-                    fields.add(spec);
-                } else {
-                    // classifyAttr already reported the diagnostic; abandon the whole record.
-                    hadError = true;
-                }
-            } else if (hasXmlText) {
-                // ---- @XmlText branch ----
-                FieldSpec spec = classifyText(c);
-                if (spec == null) {
-                    hadError = true;
-                } else {
-                    textCount++;
-                    if (textCount > 1) {
-                        sp.diagnostics().error(c.nativeHandle(),
-                                "@XmlText may appear at most once per record");
-                        hadError = true;
-                        continue;
-                    }
-                    fields.add(spec);
-                }
-            } else if (hasXmlMap) {
-                // ---- @XmlMap branch ----
-                FieldSpec spec = classifyMap(c, nsMap);
-                if (spec == null) {
-                    hadError = true;
-                } else {
-                    fields.add(spec);
-                }
-            } else if (TypeRefClassification.isJavaUtilMap(c.type())) {
-                // Map<K,V> without @XmlMap → error (mirrors original Classifier.java lines 204-207)
-                sp.diagnostics().error(c.nativeHandle(),
-                        "Field '" + cName + "' is Map<K, V> but lacks @XmlMap");
-                hadError = true;
-            } else {
-                // @XmlChild (explicit or implicit) branch — unannotated components fall
-                // through with the field name as the default path. APT relies on this
-                // shorthand for plain Java records (`record Doc(String body) {}` →
-                // implicit `@XmlChild(path="body")`); KSP code paths that want the strict
-                // "no binding rejected" diagnostic should emit it before reaching the
-                // classifier, since the classifier can't tell host-language semantics
-                // apart at this layer.
-                FieldSpec spec = classifyChild(c, nsMap);
-                if (spec == null) {
-                    hadError = true;
-                } else {
-                    fields.add(spec);
-                }
-            }
-        }
-
-        if (hadError) {
-            return null;
-        }
-
-        // Cross-field path checks: ambiguous overlaps between @XmlChild paths, descendant
-        // collisions, @XmlMap entry conflicts, polymorphic tag/wrap clashes. Mirrors
-        // original Classifier.java line 130.
         String ownerFq = record.qualifiedName();
-        if (!validateChildPaths(record, ownerFq, fields)) {
-            return null;
-        }
+        if (!validateChildPaths(record, ownerFq, fields)) return null;
 
         return new RecordSpec(
                 record.packageName(),
@@ -278,6 +130,168 @@ public final class CoreClassifier {
                 nsMap,
                 fields,
                 record.nativeHandle());
+    }
+
+    /**
+     * Eagerly validates the {@code @XmlRecord(path=...)} string against the runtime path parser so
+     * syntax errors surface as a single ERROR diagnostic instead of a stack trace at emit time.
+     * Mirrors original Classifier.classifyTopLevel lines 74-81.
+     */
+    private boolean validateRecordPath(RecordSymbol record, String recordPath, Map<String, String> nsMap) {
+        if (recordPath.isEmpty()) return true;
+        try {
+            xmlfluss.runtime.Paths.INSTANCE.compile(recordPath, nsMap);
+            return true;
+        } catch (RuntimeException ex) {
+            sp.diagnostics().error(record.nativeHandle(),
+                    "@XmlRecord path '" + recordPath + "' is invalid: " + ex.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Classifies every component of {@code record}, accumulating fields and dup-attr/text-count
+     * state in a {@link ComponentCtx}. Returns the collected fields, or {@code null} if any
+     * component reported an error (all components are still visited so every diagnostic is
+     * emitted in one pass).
+     */
+    private @Nullable List<FieldSpec> classifyComponents(RecordSymbol record, Map<String, String> nsMap) {
+        ComponentCtx ctx = new ComponentCtx();
+        boolean hadError = false;
+        for (ComponentSymbol c : record.components()) {
+            if (!classifyComponent(c, nsMap, ctx)) {
+                hadError = true;
+            }
+        }
+        return hadError ? null : ctx.fields;
+    }
+
+    /**
+     * Classifies a single component, dispatching to the binding-specific branch. Returns
+     * {@code true} on success (or no-op skip), {@code false} after any diagnostic.
+     */
+    private boolean classifyComponent(ComponentSymbol c, Map<String, String> nsMap, ComponentCtx ctx) {
+        boolean hasXmlAttr  = c.annotations().has(FQ_XML_ATTR);
+        boolean hasXmlChild = c.annotations().has(FQ_XML_CHILD);
+        boolean hasXmlText  = c.annotations().has(FQ_XML_TEXT);
+        boolean hasXmlMap   = c.annotations().has(FQ_XML_MAP);
+        String  cName       = c.name();
+
+        // Mutual exclusion: @XmlAttr / @XmlChild / @XmlText / @XmlMap
+        int bindings = (hasXmlAttr ? 1 : 0) + (hasXmlChild ? 1 : 0)
+                + (hasXmlText ? 1 : 0) + (hasXmlMap ? 1 : 0);
+        if (bindings > 1) {
+            sp.diagnostics().error(c.nativeHandle(),
+                    "@XmlAttr / " + XML_CHILD + " / @XmlText / " + XML_MAP + " are mutually exclusive on '"
+                            + cName + "'");
+            return false;
+        }
+
+        // Reject nullable List fields. Kotlin lets users write `List<X>?`, but the parser
+        // contract is "no matches → empty list". A nullable list would require the parser
+        // to choose between null and an empty list, with no guidance from the source.
+        // Java records have no syntactic equivalent so APT doesn't trip this; CoreClassifier
+        // enforces it once for every host language.
+        if (c.isList() && c.nullable()) {
+            sp.diagnostics().error(c.nativeHandle(),
+                    "List field '" + cName + "' must not be nullable; use empty list");
+            return false;
+        }
+
+        // Mutual exclusion: @XmlFormat and @XmlConverter (checked here so all branches enforce it)
+        boolean hasFormat    = c.annotations().has(FQ_XML_FORMAT);
+        boolean hasConverter = c.annotations().has(FQ_XML_CONVERTER);
+        if (hasFormat && hasConverter) {
+            sp.diagnostics().error(c.nativeHandle(),
+                    XML_FORMAT_AND_XML_CONVERTER_ARE_MUTUALLY_EXCLUSIVE_ON + cName + "'");
+            return false;
+        }
+
+        // Polymorphic dispatch: if the element type is a sealed parent annotated with
+        // @XmlPolymorphic, and @XmlChild is present, route to classifyPolymorphic.
+        // Mirror original Classifier.java lines 229-239.
+        TypeRef checkType = c.isList() ? c.elementType() : c.type();
+        RecordSymbol polyParent = sp.lookupRecord(checkType.qualifiedName());
+        boolean isPolyParent = polyParent != null
+                && polyParent.annotations().has(FQ_XML_POLYMORPHIC);
+
+        if (isPolyParent && hasConverter) {
+            sp.diagnostics().error(c.nativeHandle(),
+                    XML_CONVERTER + NOT_SUPPORTED_ON_POLYMORPHIC_FIELD + cName + "'");
+            return false;
+        }
+        if (isPolyParent && hasXmlChild) {
+            FieldSpec spec = classifyPolymorphic(c, polyParent, nsMap);
+            if (spec == null) return false;
+            ctx.fields.add(spec);
+            return true;
+        }
+
+        if (hasXmlAttr) return tryClassifyAttr(c, nsMap, ctx);
+        if (hasXmlText) return tryClassifyText(c, ctx);
+        if (hasXmlMap)  return tryClassifyMap(c, nsMap, ctx);
+        if (TypeRefClassification.isJavaUtilMap(c.type())) {
+            // Map<K,V> without @XmlMap → error (mirrors original Classifier.java lines 204-207)
+            sp.diagnostics().error(c.nativeHandle(),
+                    "Field '" + cName + "' is Map<K, V> but lacks " + XML_MAP);
+            return false;
+        }
+        // @XmlChild (explicit or implicit) branch — unannotated components fall through with
+        // the field name as the default path. APT relies on this shorthand for plain Java
+        // records (`record Doc(String body) {}` → implicit `@XmlChild(path="body")`); KSP code
+        // paths that want the strict "no binding rejected" diagnostic should emit it before
+        // reaching the classifier, since the classifier can't tell host-language semantics
+        // apart at this layer.
+        return tryClassifyChild(c, nsMap, ctx);
+    }
+
+    /** Attr branch: classifies, rejects duplicate {@code @XmlAttr} names, then appends. */
+    private boolean tryClassifyAttr(ComponentSymbol c, Map<String, String> nsMap, ComponentCtx ctx) {
+        FieldSpec spec = classifyAttr(c, nsMap);
+        if (spec == null) return false;
+        if (spec.source() instanceof Source.Attr attr) {
+            String key = qnameKey(attr.ns(), attr.name());
+            if (!ctx.seenAttrKeys.add(key)) {
+                String first = ctx.firstAttrBindingByKey.get(key);
+                sp.diagnostics().error(c.nativeHandle(),
+                        "duplicate @XmlAttr name '" + attr.name() + "': '"
+                                + first + "' and '" + spec.name() + "' both bind it");
+                return false;
+            }
+            ctx.firstAttrBindingByKey.put(key, spec.name());
+        }
+        ctx.fields.add(spec);
+        return true;
+    }
+
+    /** Text branch: classifies, rejects more than one {@code @XmlText} per record. */
+    private boolean tryClassifyText(ComponentSymbol c, ComponentCtx ctx) {
+        FieldSpec spec = classifyText(c);
+        if (spec == null) return false;
+        ctx.textCount++;
+        if (ctx.textCount > 1) {
+            sp.diagnostics().error(c.nativeHandle(),
+                    "@XmlText may appear at most once per record");
+            return false;
+        }
+        ctx.fields.add(spec);
+        return true;
+    }
+
+    /** Map branch: classifies, then appends. */
+    private boolean tryClassifyMap(ComponentSymbol c, Map<String, String> nsMap, ComponentCtx ctx) {
+        FieldSpec spec = classifyMap(c, nsMap);
+        if (spec == null) return false;
+        ctx.fields.add(spec);
+        return true;
+    }
+
+    /** Child branch (explicit or implicit @XmlChild): classifies, then appends. */
+    private boolean tryClassifyChild(ComponentSymbol c, Map<String, String> nsMap, ComponentCtx ctx) {
+        FieldSpec spec = classifyChild(c, nsMap);
+        if (spec == null) return false;
+        ctx.fields.add(spec);
+        return true;
     }
 
     // ------------------------------------------------------------------ @XmlPolymorphic classification
@@ -294,22 +308,44 @@ public final class CoreClassifier {
                                                      Map<String, String> nsMap) {
         String name = c.name();
 
-        // @XmlFormat is not supported on polymorphic fields
-        if (c.annotations().has(FQ_XML_FORMAT)) {
-            sp.diagnostics().error(c.nativeHandle(),
-                    "@XmlFormat not supported on polymorphic field '" + name + "'");
-            return null;
-        }
+        List<RecordSymbol> subtypes = validatePolymorphicSubtypes(c, name, polyParent, nsMap);
+        if (subtypes == null) return null;
 
-        // discriminator comes from the *parent* type's @XmlPolymorphic annotation,
-        // not from the field.  Mirrors original Classifier.java line 355.
+        // Discriminator comes from the *parent* type's @XmlPolymorphic annotation, not the field.
+        // Mirrors original Classifier.java line 355.
         String parentDisc = polyParent.annotations().stringValue(FQ_XML_POLYMORPHIC, "discriminator");
         String discriminator = (parentDisc == null) ? "" : parentDisc;
+
+        String pathRaw = c.annotations().stringValue(FQ_XML_CHILD, "path");
+        String rawPath = (pathRaw == null) ? "" : pathRaw;
+
+        PolyDispatch dispatch = discriminator.isEmpty()
+                ? buildTagDispatch(c, name, subtypes, rawPath, nsMap)
+                : buildAttrDispatch(c, name, subtypes, rawPath, discriminator, nsMap);
+        if (dispatch == null) return null;
+
+        return buildPolyFieldSpec(c, name, polyParent, dispatch);
+    }
+
+    /**
+     * Validates polymorphic-field-level constraints: rejects {@code @XmlFormat}, requires the sealed
+     * parent to have at least one permitted subclass, requires every subclass to carry
+     * {@code @XmlSubtype}, and registers each subclass as a nested record. Returns the subtype list
+     * or {@code null} after a diagnostic.
+     */
+    private @Nullable List<RecordSymbol> validatePolymorphicSubtypes(ComponentSymbol c, String name,
+                                                                     RecordSymbol polyParent,
+                                                                     Map<String, String> nsMap) {
+        if (c.annotations().has(FQ_XML_FORMAT)) {
+            sp.diagnostics().error(c.nativeHandle(),
+                    XML_FORMAT + NOT_SUPPORTED_ON_POLYMORPHIC_FIELD + name + "'");
+            return null;
+        }
 
         List<RecordSymbol> subtypes = polyParent.sealedSubtypes();
         if (subtypes.isEmpty()) {
             sp.diagnostics().error(c.nativeHandle(),
-                    "polymorphic field '" + name + "': sealed type "
+                    POLYMORPHIC_FIELD + name + "': sealed type "
                             + polyParent.qualifiedName() + " has no permitted subclasses");
             return null;
         }
@@ -317,116 +353,133 @@ public final class CoreClassifier {
         for (RecordSymbol s : subtypes) {
             if (!s.annotations().has(FQ_XML_SUBTYPE)) {
                 sp.diagnostics().error(c.nativeHandle(),
-                        "polymorphic field '" + name + "': subtype " + s.qualifiedName()
+                        POLYMORPHIC_FIELD + name + SUBTYPE + s.qualifiedName()
                                 + " is missing @XmlSubtype");
                 return null;
             }
         }
 
-        // Ensure every subtype is registered as a nested record
         for (RecordSymbol s : subtypes) {
             String nestedFq = ensureNested(c, name, s, nsMap, /*terminating=*/true);
             if (nestedFq == null) return null;
         }
+        return subtypes;
+    }
 
-        // Path from the field's @XmlChild annotation
-        String pathRaw = c.annotations().stringValue(FQ_XML_CHILD, "path");
-        String rawPath = (pathRaw == null) ? "" : pathRaw;
-
-        PolyDispatch dispatch;
-        if (discriminator.isEmpty()) {
-            // ---- Tag mode ----
-            if (!rawPath.isEmpty()) {
-                sp.diagnostics().error(c.nativeHandle(),
-                        "polymorphic field '" + name
-                                + "': tag-mode @XmlChild path must be empty (got '" + rawPath + "')");
-                return null;
-            }
-            List<TagVariant> variants = new ArrayList<>();
-            Set<String> seen = new HashSet<>();
-            for (RecordSymbol s : subtypes) {
-                String subName = s.annotations().stringValue(FQ_XML_SUBTYPE, "name");
-                if (subName == null || subName.isEmpty()) {
-                    sp.diagnostics().error(c.nativeHandle(),
-                            "polymorphic field '" + name + "': subtype " + s.qualifiedName()
-                                    + " @XmlSubtype.name is empty");
-                    return null;
-                }
-                QNameInfo qn = resolveQName(subName, nsMap, nsMap.get(""), c, "@XmlSubtype", name);
-                if (qn == null) return null;
-                String key = qnameKey(qn.ns(), qn.local());
-                if (!seen.add(key)) {
-                    sp.diagnostics().error(c.nativeHandle(),
-                            "polymorphic field '" + name + "': duplicate @XmlSubtype tag '"
-                                    + subName + "'");
-                    return null;
-                }
-                variants.add(new TagVariant(qn.ns(), qn.local(), s.qualifiedName()));
-            }
-            dispatch = new PolyDispatch.Tag(variants);
-        } else {
-            // ---- Attr mode ----
-            if (!discriminator.startsWith("@")) {
-                sp.diagnostics().error(c.nativeHandle(),
-                        "polymorphic field '" + name
-                                + "': @XmlPolymorphic.discriminator must start with '@' (got '"
-                                + discriminator + "')");
-                return null;
-            }
-            String attrRaw = discriminator.substring(1);
-            if (attrRaw.isEmpty() || attrRaw.contains("/")) {
-                sp.diagnostics().error(c.nativeHandle(),
-                        "polymorphic field '" + name + "': bad discriminator '" + discriminator + "'");
-                return null;
-            }
-            QNameInfo aqn = resolveQName(attrRaw, nsMap, /*defaultNs=*/null, c,
-                    "@XmlPolymorphic discriminator", name);
-            if (aqn == null) return null;
-            if (rawPath.isEmpty()) {
-                sp.diagnostics().error(c.nativeHandle(),
-                        "polymorphic field '" + name
-                                + "': attr-mode @XmlChild requires the wrapping element path");
-                return null;
-            }
-            if (rawPath.startsWith("//") || rawPath.contains("/") || rawPath.startsWith("@")) {
-                sp.diagnostics().error(c.nativeHandle(),
-                        "polymorphic field '" + name
-                                + "': attr-mode @XmlChild path must be a single direct-child"
-                                + " element (got '" + rawPath + "')");
-                return null;
-            }
-            QNameInfo wqn = resolveQName(rawPath, nsMap, nsMap.get(""), c, "@XmlChild", name);
-            if (wqn == null) return null;
-            List<AttrVariant> variants = new ArrayList<>();
-            Set<String> seen = new HashSet<>();
-            for (RecordSymbol s : subtypes) {
-                String value = s.annotations().stringValue(FQ_XML_SUBTYPE, "name");
-                if (value == null || value.isEmpty()) {
-                    sp.diagnostics().error(c.nativeHandle(),
-                            "polymorphic field '" + name + "': subtype " + s.qualifiedName()
-                                    + " @XmlSubtype.name is empty");
-                    return null;
-                }
-                if (!seen.add(value)) {
-                    sp.diagnostics().error(c.nativeHandle(),
-                            "polymorphic field '" + name
-                                    + "': duplicate @XmlSubtype attr value '" + value + "'");
-                    return null;
-                }
-                variants.add(new AttrVariant(value, s.qualifiedName()));
-            }
-            dispatch = new PolyDispatch.Attr(wqn.ns(), wqn.local(), aqn.ns(), aqn.local(), variants);
+    /**
+     * Tag-mode dispatch: rejects non-empty {@code @XmlChild} path, then collects one
+     * {@link TagVariant} per subtype with qname-based duplicate detection.
+     */
+    private @Nullable PolyDispatch buildTagDispatch(ComponentSymbol c, String name,
+                                                    List<RecordSymbol> subtypes, String rawPath,
+                                                    Map<String, String> nsMap) {
+        if (!rawPath.isEmpty()) {
+            sp.diagnostics().error(c.nativeHandle(),
+                    POLYMORPHIC_FIELD + name
+                            + "': tag-mode " + XML_CHILD + " path must be empty (got '" + rawPath + "')");
+            return null;
         }
+        List<TagVariant> variants = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (RecordSymbol s : subtypes) {
+            String subName = readSubtypeName(c, name, s);
+            if (subName == null) return null;
+            QNameInfo qn = resolveQName(subName, nsMap, nsMap.get(""), c, "@XmlSubtype", name);
+            if (qn == null) return null;
+            if (!seen.add(qnameKey(qn.ns(), qn.local()))) {
+                sp.diagnostics().error(c.nativeHandle(),
+                        POLYMORPHIC_FIELD + name + "': duplicate @XmlSubtype tag '"
+                                + subName + "'");
+                return null;
+            }
+            variants.add(new TagVariant(qn.ns(), qn.local(), s.qualifiedName()));
+        }
+        return new PolyDispatch.Tag(variants);
+    }
 
-        // Build the FieldSpec.  The type is the sealed parent; Coerce is Nested(parentFq)
-        // (mirroring original Classifier.java lines 452-460).
+    /**
+     * Attr-mode dispatch: validates the {@code @XmlPolymorphic.discriminator} syntax and the
+     * wrapping {@code @XmlChild} path shape, then collects one {@link AttrVariant} per subtype with
+     * raw-value duplicate detection.
+     */
+    private @Nullable PolyDispatch buildAttrDispatch(ComponentSymbol c, String name,
+                                                     List<RecordSymbol> subtypes, String rawPath,
+                                                     String discriminator, Map<String, String> nsMap) {
+        if (!discriminator.startsWith("@")) {
+            sp.diagnostics().error(c.nativeHandle(),
+                    POLYMORPHIC_FIELD + name
+                            + "': @XmlPolymorphic.discriminator must start with '@' (got '"
+                            + discriminator + "')");
+            return null;
+        }
+        String attrRaw = discriminator.substring(1);
+        if (attrRaw.isEmpty() || attrRaw.contains("/")) {
+            sp.diagnostics().error(c.nativeHandle(),
+                    POLYMORPHIC_FIELD + name + "': bad discriminator '" + discriminator + "'");
+            return null;
+        }
+        QNameInfo aqn = resolveQName(attrRaw, nsMap, /*defaultNs=*/null, c,
+                "@XmlPolymorphic discriminator", name);
+        if (aqn == null) return null;
+        if (rawPath.isEmpty()) {
+            sp.diagnostics().error(c.nativeHandle(),
+                    POLYMORPHIC_FIELD + name
+                            + "': attr-mode " + XML_CHILD + " requires the wrapping element path");
+            return null;
+        }
+        if (rawPath.startsWith("//") || rawPath.contains("/") || rawPath.startsWith("@")) {
+            sp.diagnostics().error(c.nativeHandle(),
+                    POLYMORPHIC_FIELD + name
+                            + "': attr-mode " + XML_CHILD + " path must be a single direct-child"
+                            + " element (got '" + rawPath + "')");
+            return null;
+        }
+        QNameInfo wqn = resolveQName(rawPath, nsMap, nsMap.get(""), c, XML_CHILD, name);
+        if (wqn == null) return null;
+        List<AttrVariant> variants = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (RecordSymbol s : subtypes) {
+            String value = readSubtypeName(c, name, s);
+            if (value == null) return null;
+            if (!seen.add(value)) {
+                sp.diagnostics().error(c.nativeHandle(),
+                        POLYMORPHIC_FIELD + name
+                                + "': duplicate @XmlSubtype attr value '" + value + "'");
+                return null;
+            }
+            variants.add(new AttrVariant(value, s.qualifiedName()));
+        }
+        return new PolyDispatch.Attr(wqn.ns(), wqn.local(), aqn.ns(), aqn.local(), variants);
+    }
+
+    /**
+     * Reads {@code @XmlSubtype.name} from {@code s}, reporting a diagnostic and returning {@code null}
+     * if missing or empty.
+     */
+    private @Nullable String readSubtypeName(ComponentSymbol c, String fieldName, RecordSymbol s) {
+        String value = s.annotations().stringValue(FQ_XML_SUBTYPE, "name");
+        if (value == null || value.isEmpty()) {
+            sp.diagnostics().error(c.nativeHandle(),
+                    POLYMORPHIC_FIELD + fieldName + SUBTYPE + s.qualifiedName()
+                            + " @XmlSubtype.name is empty");
+            return null;
+        }
+        return value;
+    }
+
+    /**
+     * Builds the terminal {@link FieldSpec} for a polymorphic field. The declared type is the sealed
+     * parent (wrapped in {@code List<>} when the component is a list); {@link Coerce} is
+     * {@code Nested(parentFq)}. Mirrors original Classifier.java lines 452-460.
+     */
+    private FieldSpec buildPolyFieldSpec(ComponentSymbol c, String name,
+                                         RecordSymbol polyParent, PolyDispatch dispatch) {
         String parentFq = polyParent.qualifiedName();
         TypeRef parentType = TypeRef.of(polyParent.packageName(), polyParent.simpleName());
         TypeRef fieldType = c.isList()
-                ? TypeRef.parameterized("java.util", "List", List.of(parentType))
+                ? TypeRef.parameterized(JAVA_UTIL_PACKAGE, "List", List.of(parentType))
                 : parentType;
         boolean required = !c.nullable();
-
         return new FieldSpec(
                 name,
                 required,
@@ -460,7 +513,7 @@ public final class CoreClassifier {
 
         if (hasFormat && hasConverter) {
             sp.diagnostics().error(c.nativeHandle(),
-                    "@XmlFormat and @XmlConverter are mutually exclusive on '" + name + "'");
+                    XML_FORMAT_AND_XML_CONVERTER_ARE_MUTUALLY_EXCLUSIVE_ON + name + "'");
             return null;
         }
 
@@ -489,7 +542,7 @@ public final class CoreClassifier {
 
         if (converterInfo == null && !TypeRefClassification.isScalarOrTemporal(elemType)) {
             sp.diagnostics().error(c.nativeHandle(),
-                    "@XmlAttr requires a scalar type on '" + name + "', got " + elemType.qualifiedName());
+                    "@XmlAttr requires a scalar type on '" + name + GOT + elemType.qualifiedName());
             return null;
         }
 
@@ -497,11 +550,11 @@ public final class CoreClassifier {
         if (hasFormat) {
             if (!TypeRefClassification.isFormattableType(elemType)) {
                 sp.diagnostics().error(c.nativeHandle(),
-                        "@XmlFormat on '" + name + "' is only supported for LocalDate, "
+                        XML_FORMAT_ON + name + "' is only supported for LocalDate, "
                                 + "LocalDateTime, Instant, or BigDecimal; got " + elemType.qualifiedName());
                 return null;
             }
-            String raw = c.annotations().stringValue(FQ_XML_FORMAT, "pattern");
+            String raw = c.annotations().stringValue(FQ_XML_FORMAT, PATTERN);
             formatPattern = (raw != null) ? raw : "";
         }
 
@@ -547,7 +600,7 @@ public final class CoreClassifier {
 
         if (converterInfo == null && !TypeRefClassification.isScalarOrTemporal(elemType)) {
             sp.diagnostics().error(c.nativeHandle(),
-                    "@XmlText requires a scalar type on '" + name + "', got "
+                    "@XmlText requires a scalar type on '" + name + GOT
                             + elemType.qualifiedName());
             return null;
         }
@@ -557,12 +610,12 @@ public final class CoreClassifier {
         if (hasFormat) {
             if (converterInfo == null && !TypeRefClassification.isFormattableType(elemType)) {
                 sp.diagnostics().error(c.nativeHandle(),
-                        "@XmlFormat on '" + name + "' is only supported for LocalDate, "
+                        XML_FORMAT_ON + name + "' is only supported for LocalDate, "
                                 + "LocalDateTime, Instant, or BigDecimal; got "
                                 + elemType.qualifiedName());
                 return null;
             }
-            String raw = c.annotations().stringValue(FQ_XML_FORMAT, "pattern");
+            String raw = c.annotations().stringValue(FQ_XML_FORMAT, PATTERN);
             formatPattern = (raw != null) ? raw : "";
         }
 
@@ -600,7 +653,7 @@ public final class CoreClassifier {
         // @XmlFormat / @XmlConverter not supported on @XmlMap
         if (c.annotations().has(FQ_XML_FORMAT) || c.annotations().has(FQ_XML_CONVERTER)) {
             sp.diagnostics().error(c.nativeHandle(),
-                    "@XmlFormat / @XmlConverter not supported on @XmlMap field '" + name + "'");
+                    XML_FORMAT + " / " + XML_CONVERTER + " not supported on " + XML_MAP + " field '" + name + "'");
             return null;
         }
 
@@ -608,7 +661,7 @@ public final class CoreClassifier {
         TypeRef declaredType = c.type();
         if (!TypeRefClassification.isJavaUtilMap(declaredType)) {
             sp.diagnostics().error(c.nativeHandle(),
-                    "@XmlMap requires Map<K, V> type for '" + name + "', got "
+                    XML_MAP + " requires Map<K, V> type for '" + name + GOT
                             + declaredType.qualifiedName());
             return null;
         }
@@ -620,17 +673,17 @@ public final class CoreClassifier {
 
         if (entry == null || entry.isBlank() || entry.contains("/") || entry.startsWith("@")) {
             sp.diagnostics().error(c.nativeHandle(),
-                    "@XmlMap entry '" + entry + "' for '" + name
+                    XML_MAP + ENTRY + entry + FOR + name
                             + "' must be a single element name (optional 'prefix:local')");
             return null;
         }
         if (keyPath == null || valPath == null) {
             sp.diagnostics().error(c.nativeHandle(),
-                    "@XmlMap on '" + name + "' is missing 'key' or 'value'");
+                    XML_MAP + ON + name + "' is missing 'key' or 'value'");
             return null;
         }
 
-        QNameInfo eqn = resolveQName(entry, nsMap, nsMap.get(""), c, "@XmlMap", name);
+        QNameInfo eqn = resolveQName(entry, nsMap, nsMap.get(""), c, XML_MAP, name);
         if (eqn == null) {
             return null;
         }
@@ -639,7 +692,7 @@ public final class CoreClassifier {
         List<TypeRef> typeArgs = declaredType.typeArguments();
         if (typeArgs.size() != 2) {
             sp.diagnostics().error(c.nativeHandle(),
-                    "@XmlMap on '" + name + "' requires Map<K, V> with two type arguments");
+                    XML_MAP + ON + name + "' requires Map<K, V> with two type arguments");
             return null;
         }
         TypeRef keyType = typeArgs.get(0);
@@ -656,7 +709,7 @@ public final class CoreClassifier {
         // Outer field: type is Map<K, V> — preserve List<X> values as-is
         TypeRef keyParam = keyField.isList() ? keyField.fieldType() : keyField.boxedType();
         TypeRef valParam = valField.isList() ? valField.fieldType() : valField.boxedType();
-        TypeRef mapType = TypeRef.parameterized("java.util", "Map", List.of(keyParam, valParam));
+        TypeRef mapType = TypeRef.parameterized(JAVA_UTIL_PACKAGE, "Map", List.of(keyParam, valParam));
 
         return new FieldSpec(
                 name,
@@ -690,131 +743,130 @@ public final class CoreClassifier {
                                                           Map<String, String> nsMap,
                                                           String owner,
                                                           String kind) {
-        // Nested List<List<?>> not supported inside map
+        if (!validateMapKvType(c, type, owner, kind)) return null;
+
+        boolean isList = TypeRefClassification.isJavaUtilList(type);
+        TypeRef typeRef = type.typeArguments().isEmpty() ? TypeRef.of("java.lang", "Object") : type.typeArguments().get(0);
+        TypeRef elemType = isList
+                ? typeRef
+                : type;
+
+        if (isList && elemType.nullable()) {
+            sp.diagnostics().error(c.nativeHandle(),
+                    XML_MAP + " '" + kind + OF + owner
+                            + "': nullable element inside List<…> not supported");
+            return null;
+        }
+        boolean nullable = !isList && elemType.nullable();
+
+        Source source = resolveMapKvSource(c, syntheticName, pathStr, nsMap, owner, kind);
+        if (source == null) return null;
+
+        ScalarBundle sb = resolveMapKvBundle(c, syntheticName, elemType, source, nullable, nsMap, owner, kind);
+        if (sb == null) return null;
+
+        TypeRef fieldTypeName = isList
+                ? TypeRef.parameterized(JAVA_UTIL_PACKAGE, "List", List.of(sb.elemTypeName()))
+                : sb.elemTypeName();
+
+        return new FieldSpec(
+                syntheticName,
+                !nullable && !isList,
+                isList,
+                sb.boxedTypeName(),
+                fieldTypeName,
+                sb.elemTypeName(),
+                sb.elemFq(),
+                source,
+                sb.coerce());
+    }
+
+    /**
+     * Rejects {@code List<List<?>>} and {@code Map<…>} value types that map entries cannot represent.
+     * Returns {@code true} when no guard fired.
+     */
+    private boolean validateMapKvType(ComponentSymbol c, TypeRef type, String owner, String kind) {
         if (TypeRefClassification.isJavaUtilList(type)) {
             TypeRef innerElem = type.typeArguments().isEmpty()
                     ? TypeRef.of("java.lang", "Object")
                     : type.typeArguments().get(0);
             if (TypeRefClassification.isJavaUtilList(innerElem)) {
                 sp.diagnostics().error(c.nativeHandle(),
-                        "@XmlMap '" + kind + "' of '" + owner + "': List<List<?>> not supported");
-                return null;
+                        XML_MAP + " '" + kind + OF + owner + "': List<List<?>> not supported");
+                return false;
             }
         }
-        // Nested Map inside map not supported
         if (TypeRefClassification.isJavaUtilMap(type)) {
             sp.diagnostics().error(c.nativeHandle(),
-                    "@XmlMap '" + kind + "' of '" + owner + "': nested Map not supported");
-            return null;
+                    XML_MAP + " '" + kind + OF + owner + "': nested Map not supported");
+            return false;
         }
+        return true;
+    }
 
-        boolean isList = TypeRefClassification.isJavaUtilList(type);
-        TypeRef elemType = isList
-                ? (type.typeArguments().isEmpty()
-                        ? TypeRef.of("java.lang", "Object")
-                        : type.typeArguments().get(0))
-                : type;
-
-        // Reject nullable element inside Map's List value (e.g. `Map<K, List<V?>>`). Mirrors
-        // the KSP-side rule that a List value's element nullability is meaningless when the
-        // streaming aggregator can never emit null — the parser collects only matched values.
-        if (isList && elemType.nullable()) {
-            sp.diagnostics().error(c.nativeHandle(),
-                    "@XmlMap '" + kind + "' of '" + owner
-                            + "': nullable element inside List<…> not supported");
-            return null;
-        }
-
-        // nullable = type arg is nullable (no @Nullable on box in TypeRef here — use nullable flag)
-        boolean nullable = !isList && elemType.nullable();
-
-        Source source;
+    /**
+     * Resolves a synthetic kv-field's {@link Source}: {@code @attr}, the self-step shorthand
+     * ({@code ""} or {@code "."}), or a full {@code @XmlChild}-style path.
+     */
+    private @Nullable Source resolveMapKvSource(ComponentSymbol c, String syntheticName, String pathStr,
+                                                Map<String, String> nsMap, String owner, String kind) {
         if (pathStr.startsWith("@")) {
             String rest = pathStr.substring(1);
             if (rest.isEmpty() || rest.contains("/")) {
                 sp.diagnostics().error(c.nativeHandle(),
-                        "@XmlMap '" + kind + "' of '" + owner
+                        XML_MAP + " '" + kind + OF + owner
                                 + "': '@' path must be a single attribute name");
                 return null;
             }
             QNameInfo aqn = resolveQName(rest, nsMap, null, c,
-                    "@XmlMap '" + kind + "'", syntheticName);
+                    XML_MAP + " '" + kind + "'", syntheticName);
             if (aqn == null) return null;
-            source = new Source.Attr(aqn.ns(), aqn.local());
-        } else if (pathStr.isEmpty() || pathStr.equals(".")) {
+            return new Source.Attr(aqn.ns(), aqn.local());
+        }
+        if (pathStr.isEmpty() || pathStr.equals(".")) {
             // Self-step shorthand: the entry element itself supplies the value (scalar →
             // its text content, nested record → the entire entry element). The Child path
             // carries a single "." element segment so downstream emit logic can recognise
             // the self-step in a uniform way; mirrors `parseChildPath`'s "." escape hatch
             // and the KSP-side `buildSyntheticMapKvField` that this code subsumes.
-            source = new Source.Child(
-                    List.of(new PathSeg.Element(nsMap.get(""), ".")),
-                    false);
-        } else {
-            Source.Child parsed = parseChildPath(pathStr, syntheticName, nsMap, c);
-            if (parsed == null) return null;
-            source = parsed;
+            return new Source.Child(List.of(new PathSeg.Element(nsMap.get(""), ".")), false);
         }
+        return parseChildPath(pathStr, syntheticName, nsMap, c);
+    }
 
-        Coerce coerce;
-        TypeRef elemTypeName;
-        TypeRef boxedTypeName;
-        String elemFq;
-
+    /**
+     * Resolves coerce + boxed/elem-type triple for a synthetic kv-field. Dispatches across scalar,
+     * nested record, and unsupported. Propagates value nullability onto the boxed scalar so an outer
+     * {@code Map<K, V?>} sees the right element type.
+     */
+    private @Nullable ScalarBundle resolveMapKvBundle(ComponentSymbol c, String syntheticName, TypeRef elemType,
+                                                      Source source, boolean nullable,
+                                                      Map<String, String> nsMap, String owner, String kind) {
         if (TypeRefClassification.isScalarOrTemporal(elemType)) {
             ScalarKind sk = TypeRefClassification.scalarKind(elemType);
             assert sk != null;
-            coerce = scalarCoerce(sk, null, c, syntheticName);
-            if (coerce == null) return null;
-            boxedTypeName = TypeRefClassification.boxedScalar(sk);
-            // Propagate the synthetic kv-field's nullability onto its boxed type so the
-            // outer Map<K, V> reported by buildSyntheticMapKvField sees `Integer?` for a
-            // declared `Map<String, Int?>` instead of plain `Integer`.
+            Coerce coerce = scalarCoerce(sk, null, c, syntheticName);
+            TypeRef boxedTypeName = TypeRefClassification.boxedScalar(sk);
             if (nullable) boxedTypeName = boxedTypeName.asNullable();
-            elemTypeName = boxedTypeName;
-            elemFq = elemType.primitive() ? elemType.simpleName() : elemType.qualifiedName();
-        } else {
-            // Check if the element type is a known nested record via the SPI
-            RecordSymbol nested = sp.lookupRecord(elemType.qualifiedName());
-            if (nested != null) {
-                // Nested record value
-                if (!(source instanceof Source.Child)) {
-                    sp.diagnostics().error(c.nativeHandle(),
-                            "@XmlMap '" + kind + "' of '" + owner
-                                    + "': nested record requires an element path, not '@attr'");
-                    return null;
-                }
-                String nestedFq = ensureNested(c, syntheticName, nested, nsMap, true);
-                if (nestedFq == null) return null;
-                coerce = new Coerce.Nested(nestedFq);
-                boxedTypeName = elemType;
-                elemTypeName = elemType;
-                elemFq = nestedFq;
-            } else {
-                sp.diagnostics().error(c.nativeHandle(),
-                        "@XmlMap '" + kind + "' of '" + owner
-                                + "': unsupported type '" + elemType.qualifiedName() + "'");
-                return null;
-            }
+            String elemFq = elemType.primitive() ? elemType.simpleName() : elemType.qualifiedName();
+            return new ScalarBundle(boxedTypeName, boxedTypeName, elemFq, coerce);
         }
-
-        TypeRef fieldTypeName;
-        if (isList) {
-            fieldTypeName = TypeRef.parameterized("java.util", "List", List.of(elemTypeName));
-        } else {
-            fieldTypeName = elemTypeName;
+        RecordSymbol nested = sp.lookupRecord(elemType.qualifiedName());
+        if (nested == null) {
+            sp.diagnostics().error(c.nativeHandle(),
+                    XML_MAP + " '" + kind + OF + owner
+                            + "': unsupported type '" + elemType.qualifiedName() + "'");
+            return null;
         }
-
-        return new FieldSpec(
-                syntheticName,
-                !nullable && !isList,
-                isList,
-                boxedTypeName,
-                fieldTypeName,
-                elemTypeName,
-                elemFq,
-                source,
-                coerce);
+        if (!(source instanceof Source.Child)) {
+            sp.diagnostics().error(c.nativeHandle(),
+                    XML_MAP + " '" + kind + OF + owner
+                            + "': nested record requires an element path, not '@attr'");
+            return null;
+        }
+        String nestedFq = ensureNested(c, syntheticName, nested, nsMap, true);
+        if (nestedFq == null) return null;
+        return new ScalarBundle(elemType, elemType, nestedFq, new Coerce.Nested(nestedFq));
     }
 
     // ------------------------------------------------------------------ @XmlChild classification
@@ -830,146 +882,134 @@ public final class CoreClassifier {
                                                Map<String, String> nsMap) {
         String name = c.name();
 
-        // ---- Raw List guard (mirrors original Classifier "Raw List is not supported") ----
-        if (c.isList() && c.type().typeArguments().isEmpty()) {
-            sp.diagnostics().error(c.nativeHandle(),
-                    "Raw List is not supported; use List<T> on '" + name + "'");
-            return null;
-        }
-        // ---- List<List<T>> and List<Optional<T>> guards ----
-        if (c.isList() && TypeRefClassification.isJavaUtilList(c.elementType())) {
-            sp.diagnostics().error(c.nativeHandle(),
-                    "List<List<T>> is not supported on '" + name + "'");
-            return null;
-        }
-        if (c.isList() && TypeRefClassification.isOptional(c.elementType())) {
-            sp.diagnostics().error(c.nativeHandle(),
-                    "List<Optional<T>> is not supported on '" + name + "'");
-            return null;
-        }
+        if (!validateChildListGuards(c, name)) return null;
 
-        TypeRef elemType = c.elementType();
+        Source source = resolveChildSource(c, name, nsMap);
+        if (source == null) return null;
 
-        // ---- Determine source ----
-        Source source;
-        boolean hasXmlChild = c.annotations().has(FQ_XML_CHILD);
-        if (hasXmlChild) {
-            String pathRaw = c.annotations().stringValue(FQ_XML_CHILD, "path");
-            if (pathRaw == null || pathRaw.isEmpty()) {
-                // No explicit path: use the component name as a single-segment child
-                QNameInfo qn = resolveQName(name, nsMap, nsMap.get(""), c, "@XmlChild", name);
-                if (qn == null) return null;
-                source = new Source.Child(List.of(new PathSeg.Element(qn.ns(), qn.local())), false);
-            } else {
-                source = parseChildPath(pathRaw, name, nsMap, c);
-                if (source == null) return null;
-            }
-        } else {
-            // Implicit child: use component name
-            QNameInfo qn = resolveQName(name, nsMap, nsMap.get(""), c, "@XmlChild", name);
-            if (qn == null) return null;
-            source = new Source.Child(List.of(new PathSeg.Element(qn.ns(), qn.local())), false);
-        }
-
-        // ---- @XmlFormat and @XmlConverter ----
         boolean hasFormat    = c.annotations().has(FQ_XML_FORMAT);
         boolean hasConverter = c.annotations().has(FQ_XML_CONVERTER);
-
         if (hasFormat && hasConverter) {
             sp.diagnostics().error(c.nativeHandle(),
-                    "@XmlFormat and @XmlConverter are mutually exclusive on '" + name + "'");
+                    XML_FORMAT_AND_XML_CONVERTER_ARE_MUTUALLY_EXCLUSIVE_ON + name + "'");
             return null;
         }
+        String formatPattern = hasFormat
+                ? Objects.requireNonNullElse(c.annotations().stringValue(FQ_XML_FORMAT, PATTERN), "")
+                : null;
 
-        // Extract format pattern; detailed validation happens later after type determination
-        String formatPattern = null;
-        if (hasFormat) {
-            String raw = c.annotations().stringValue(FQ_XML_FORMAT, "pattern");
-            formatPattern = (raw != null) ? raw : "";
+        TypeRef elemType = c.elementType();
+        ScalarBundle sb = resolveChildBundle(c, name, elemType, hasFormat, formatPattern, hasConverter, nsMap);
+        if (sb == null) return null;
+
+        TypeRef fieldType = computeChildFieldType(c.isList(), elemType.primitive(), elemType, sb.elemTypeName());
+        return new FieldSpec(
+                name,
+                !c.nullable(),
+                c.isList(),
+                sb.boxedTypeName(),
+                fieldType,
+                sb.elemTypeName(),
+                sb.elemFq(),
+                source,
+                sb.coerce());
+    }
+
+    /**
+     * Rejects raw {@code List}, {@code List<List<T>>}, and {@code List<Optional<T>>} on a child component.
+     * Returns {@code true} when no guard fired.
+     */
+    private boolean validateChildListGuards(ComponentSymbol c, String name) {
+        if (!c.isList()) return true;
+        if (c.type().typeArguments().isEmpty()) {
+            sp.diagnostics().error(c.nativeHandle(),
+                    "Raw List is not supported; use List<T> on '" + name + "'");
+            return false;
         }
+        if (TypeRefClassification.isJavaUtilList(c.elementType())) {
+            sp.diagnostics().error(c.nativeHandle(),
+                    "List<List<T>> is not supported on '" + name + "'");
+            return false;
+        }
+        if (TypeRefClassification.isOptional(c.elementType())) {
+            sp.diagnostics().error(c.nativeHandle(),
+                    "List<Optional<T>> is not supported on '" + name + "'");
+            return false;
+        }
+        return true;
+    }
 
-        // ---- Coerce + type names (mirrors Classifier.java lines 280-340) ----
-        boolean primitive = elemType.primitive();
-        boolean required = !c.nullable();
+    /**
+     * Resolves a child component's {@link Source}: explicit {@code @XmlChild(path=...)} when present,
+     * otherwise the component name as an implicit single-segment element.
+     */
+    private @Nullable Source resolveChildSource(ComponentSymbol c, String name, Map<String, String> nsMap) {
+        if (c.annotations().has(FQ_XML_CHILD)) {
+            String pathRaw = c.annotations().stringValue(FQ_XML_CHILD, "path");
+            if (pathRaw != null && !pathRaw.isEmpty()) {
+                return parseChildPath(pathRaw, name, nsMap, c);
+            }
+        }
+        QNameInfo qn = resolveQName(name, nsMap, nsMap.get(""), c, XML_CHILD, name);
+        if (qn == null) return null;
+        return new Source.Child(List.of(new PathSeg.Element(qn.ns(), qn.local())), false);
+    }
 
-        TypeRef boxedTypeName;
-        TypeRef elemTypeName;
-        TypeRef fieldType;
-        String elemFq;
-        Coerce coerce;
-
+    /**
+     * Resolves a child component's coerce + boxed/elem-type triple. Dispatches across the four
+     * cases: explicit converter, scalar/temporal, nested record, unsupported. Mirrors original
+     * Classifier.java lines 280-340.
+     */
+    private @Nullable ScalarBundle resolveChildBundle(ComponentSymbol c, String name, TypeRef elemType,
+                                                      boolean hasFormat, @Nullable String formatPattern,
+                                                      boolean hasConverter, Map<String, String> nsMap) {
         if (hasConverter) {
             ConverterResult cr = resolveConverter(c, name, elemType);
             if (cr.error()) return null;
-            ScalarBundle sb = resolveScalarBundle(c, name, elemType, cr.info(), null);
-            if (sb == null) return null;
-            coerce = sb.coerce();
-            boxedTypeName = sb.boxedTypeName();
-            elemTypeName = sb.elemTypeName();
-            elemFq = sb.elemFq();
-        } else if (TypeRefClassification.isScalarOrTemporal(elemType)) {
+            return resolveScalarBundle(c, name, elemType, cr.info(), null);
+        }
+        if (TypeRefClassification.isScalarOrTemporal(elemType)) {
             if (hasFormat && !TypeRefClassification.isFormattableType(elemType)) {
-                sp.diagnostics().error(c.nativeHandle(),
-                        "@XmlFormat on '" + name + "' is only supported for LocalDate, "
-                                + "LocalDateTime, Instant, or BigDecimal; got " + elemType.qualifiedName());
+                reportUnsupportedFormatType(c, name, elemType);
                 return null;
             }
-            ScalarBundle sb = resolveScalarBundle(c, name, elemType, null, formatPattern);
-            if (sb == null) return null;
-            coerce = sb.coerce();
-            boxedTypeName = sb.boxedTypeName();
-            elemTypeName = sb.elemTypeName();
-            elemFq = sb.elemFq();
-        } else if (c.asNestedRecord() != null) {
-            // Nested record
-            // @XmlFormat has no effect on nested records
+            return resolveScalarBundle(c, name, elemType, null, formatPattern);
+        }
+        if (c.asNestedRecord() != null) {
             if (hasFormat) {
                 sp.diagnostics().error(c.nativeHandle(),
-                        "@XmlFormat on '" + name + "' has no effect on a nested record");
+                        XML_FORMAT_ON + name + "' has no effect on a nested record");
                 return null;
             }
-            RecordSymbol nested = c.asNestedRecord();
-            // terminating = isList or nullable (consistent with original)
+            RecordSymbol nested = Objects.requireNonNull(c.asNestedRecord());
             boolean terminating = c.isList() || c.nullable();
-            String nestedFqn = ensureNested(c, name, Objects.requireNonNull(nested), nsMap, terminating);
+            String nestedFqn = ensureNested(c, name, nested, nsMap, terminating);
             if (nestedFqn == null) return null;
-            coerce = new Coerce.Nested(nestedFqn);
-            boxedTypeName = elemType;
-            elemTypeName = elemType;
-            elemFq = nestedFqn;
-        } else {
-            // Unsupported type
-            if (hasFormat) {
-                sp.diagnostics().error(c.nativeHandle(),
-                        "@XmlFormat on '" + name + "' is only supported for LocalDate, "
-                                + "LocalDateTime, Instant, or BigDecimal; got " + elemType.qualifiedName());
-            } else {
-                sp.diagnostics().error(c.nativeHandle(),
-                        "Unsupported field type '" + elemType.qualifiedName()
-                                + "' for component '" + name + "'");
-            }
-            return null;
+            return new ScalarBundle(elemType, elemType, nestedFqn, new Coerce.Nested(nestedFqn));
         }
-
-        // ---- Field type ----
-        if (c.isList()) {
-            fieldType = TypeRef.parameterized("java.util", "List", List.of(elemTypeName));
-        } else if (primitive) {
-            fieldType = elemType;
+        if (hasFormat) {
+            reportUnsupportedFormatType(c, name, elemType);
         } else {
-            fieldType = elemTypeName;
+            sp.diagnostics().error(c.nativeHandle(),
+                    "Unsupported field type '" + elemType.qualifiedName()
+                            + "' for component '" + name + "'");
         }
+        return null;
+    }
 
-        return new FieldSpec(
-                name,
-                required,
-                c.isList(),
-                boxedTypeName,
-                fieldType,
-                elemTypeName,
-                elemFq,
-                source,
-                coerce);
+    private void reportUnsupportedFormatType(ComponentSymbol c, String name, TypeRef elemType) {
+        sp.diagnostics().error(c.nativeHandle(),
+                XML_FORMAT_ON + name + "' is only supported for LocalDate, "
+                        + "LocalDateTime, Instant, or BigDecimal; got " + elemType.qualifiedName());
+    }
+
+    /** Wraps {@code elemTypeName} in {@code List<>} for list components, otherwise returns the
+     *  primitive {@code elemType} for primitives or the boxed {@code elemTypeName} for everything else. */
+    private static TypeRef computeChildFieldType(boolean isList, boolean primitive,
+                                                 TypeRef elemType, TypeRef elemTypeName) {
+        if (isList) return TypeRef.parameterized(JAVA_UTIL_PACKAGE, "List", List.of(elemTypeName));
+        if (primitive) return elemType;
+        return elemTypeName;
     }
 
     // ------------------------------------------------------------------ path parsing
@@ -985,7 +1025,7 @@ public final class CoreClassifier {
                                                    ComponentSymbol owner) {
         if (path.isBlank()) {
             sp.diagnostics().error(owner.nativeHandle(),
-                    "@XmlChild path empty for '" + fieldName + "'");
+                    XML_CHILD + " path empty for '" + fieldName + "'");
             return null;
         }
 
@@ -998,12 +1038,36 @@ public final class CoreClassifier {
 
         boolean descendant = path.startsWith("//");
         if (path.startsWith("/") && !descendant) {
-            sp.diagnostics().error(owner.nativeHandle(),
-                    "@XmlChild path '" + path + "' for '" + fieldName
-                            + "': invalid syntax (absolute paths are not supported)");
+            reportPathError(owner, path, fieldName, "invalid syntax (absolute paths are not supported)");
             return null;
         }
 
+        List<Step> steps = compilePathSteps(path, fieldName, owner, nsMap);
+        if (steps == null) return null;
+
+        if (descendant && steps.get(0) instanceof Step.AttrLeaf) {
+            reportPathError(owner, path, fieldName, "descendant axis head must be an element");
+            return null;
+        }
+
+        List<PathSeg> segs = convertSteps(steps, path, fieldName, owner, descendant);
+        if (segs == null) return null;
+        return new Source.Child(segs, descendant);
+    }
+
+    /** Reports a {@code @XmlChild path '<path>' for '<field>': <reason>} diagnostic. */
+    private void reportPathError(ComponentSymbol owner, String path, String fieldName, String reason) {
+        sp.diagnostics().error(owner.nativeHandle(),
+                XML_CHILD + PATH + path + FOR + fieldName + "': " + reason);
+    }
+
+    /**
+     * Parses {@code path} via {@link PathParser}, strips the auto-prepended descendant axis, and
+     * returns the remaining steps. Returns {@code null} (with a diagnostic) on parse error or when
+     * the result is empty after axis stripping.
+     */
+    private @Nullable List<Step> compilePathSteps(String path, String fieldName, ComponentSymbol owner,
+                                                  Map<String, String> nsMap) {
         String defaultNs = nsMap.get("");
         PathParser parser = new PathParser(nsMap::get, defaultNs);
         CompiledPath compiled;
@@ -1011,9 +1075,7 @@ public final class CoreClassifier {
             compiled = parser.parse(path);
         } catch (PathParseException e) {
             String msg = e.getMessage() == null ? "" : e.getMessage();
-            sp.diagnostics().error(owner.nativeHandle(),
-                    "@XmlChild path '" + path + "' for '" + fieldName + "': "
-                            + rewriteParseError(msg));
+            reportPathError(owner, path, fieldName, rewriteParseError(msg));
             return null;
         }
 
@@ -1025,77 +1087,75 @@ public final class CoreClassifier {
                 : rawSteps;
 
         if (steps.isEmpty()) {
-            sp.diagnostics().error(owner.nativeHandle(),
-                    "@XmlChild path '" + path + "' for '" + fieldName + "': empty after axis");
+            reportPathError(owner, path, fieldName, "empty after axis");
             return null;
         }
+        return steps;
+    }
 
-        if (descendant && steps.get(0) instanceof Step.AttrLeaf) {
-            sp.diagnostics().error(owner.nativeHandle(),
-                    "@XmlChild path '" + path + "' for '" + fieldName
-                            + "': descendant axis head must be an element");
-            return null;
-        }
-
+    /**
+     * Translates parser {@link Step}s into emitter {@link PathSeg}s, rejecting non-head descendants,
+     * non-tail attribute leaves, head-attribute leaves, wildcards, and predicate violations.
+     */
+    private @Nullable List<PathSeg> convertSteps(List<Step> steps, String path, String fieldName,
+                                                 ComponentSymbol owner, boolean descendant) {
         List<PathSeg> segs = new ArrayList<>(steps.size());
         for (int i = 0; i < steps.size(); i++) {
             Step s = steps.get(i);
             boolean last = (i == steps.size() - 1);
 
             if (s instanceof Step.Descendant) {
-                sp.diagnostics().error(owner.nativeHandle(),
-                        "@XmlChild path '" + path + "' for '" + fieldName
-                                + "': '//' is only allowed at the head of the path");
+                reportPathError(owner, path, fieldName, "'//' is only allowed at the head of the path");
                 return null;
             } else if (s instanceof Step.AttrLeaf attr) {
                 if (!last) {
-                    sp.diagnostics().error(owner.nativeHandle(),
-                            "@XmlChild path '" + path + "' for '" + fieldName
-                                    + "': '@' segment must be last");
+                    reportPathError(owner, path, fieldName, "'@' segment must be last");
                     return null;
                 }
                 if (i == 0) {
-                    sp.diagnostics().error(owner.nativeHandle(),
-                            "@XmlChild path '" + path + "' for '" + fieldName
-                                    + "': use @XmlAttr for record-level attributes");
+                    reportPathError(owner, path, fieldName, "use @XmlAttr for record-level attributes");
                     return null;
                 }
                 segs.add(new PathSeg.AttrLeaf(attr.getName().getNs(), attr.getName().getLocal()));
             } else {
-                Step.Named named = (Step.Named) s;
-                if ("*".equals(named.getName().getLocal())) {
-                    sp.diagnostics().error(owner.nativeHandle(),
-                            "@XmlChild path '" + path + "' for '" + fieldName
-                                    + "': wildcard local-name '*' is not supported");
-                    return null;
-                }
-                if (PathParser.WILDCARD.equals(named.getName().getNs())) {
-                    sp.diagnostics().error(owner.nativeHandle(),
-                            "@XmlChild path '" + path + "' for '" + fieldName
-                                    + "': wildcard namespace '{*}' is not supported");
-                    return null;
-                }
-                boolean onDescHead = descendant && i == 0;
-                List<Predicate> brackets = named.getBrackets();
-                for (Predicate b : brackets) {
-                    if (childPredicateInvalid(b, path, fieldName, owner, onDescHead)) {
-                        return null;
-                    }
-                }
-                long indexBracketCount = brackets.stream().filter(CoreClassifier::containsIndex).count();
-                if (indexBracketCount > 1) {
-                    sp.diagnostics().error(owner.nativeHandle(),
-                            "@XmlChild path '" + path + "' for '" + fieldName
-                                    + "': only one positional predicate is allowed per segment (found multiple in '"
-                                    + named.getName().getLocal() + "'). Express the second positional via @XmlRecord, or restructure your XML.");
-                    return null;
-                }
-                segs.add(new PathSeg.Element(named.getName().getNs(), named.getName().getLocal(),
-                        brackets));
+                PathSeg.Element elem = convertNamedStep((Step.Named) s, path, fieldName, owner,
+                        descendant && i == 0);
+                if (elem == null) return null;
+                segs.add(elem);
             }
         }
+        return segs;
+    }
 
-        return new Source.Child(segs, descendant);
+    /**
+     * Converts a single {@link Step.Named} into a {@link PathSeg.Element}, rejecting wildcard
+     * local-names, wildcard namespaces, invalid predicates, and more than one positional predicate.
+     */
+    private PathSeg.@Nullable Element convertNamedStep(Step.Named named, String path, String fieldName,
+                                                       ComponentSymbol owner, boolean onDescHead) {
+        if ("*".equals(named.getName().getLocal())) {
+            reportPathError(owner, path, fieldName, "wildcard local-name '*' is not supported");
+            return null;
+        }
+        if (PathParser.WILDCARD.equals(named.getName().getNs())) {
+            reportPathError(owner, path, fieldName, "wildcard namespace '{*}' is not supported");
+            return null;
+        }
+        List<Predicate> brackets = named.getBrackets();
+        for (Predicate b : brackets) {
+            if (childPredicateInvalid(b, path, fieldName, owner, onDescHead)) {
+                return null;
+            }
+        }
+        long indexBracketCount = brackets.stream().filter(CoreClassifier::containsIndex).count();
+        if (indexBracketCount > 1) {
+            reportPathError(owner, path, fieldName,
+                    "only one positional predicate is allowed per segment (found multiple in '"
+                            + named.getName().getLocal()
+                            + "'). Express the second positional via @XmlRecord, or restructure your XML.");
+            return null;
+        }
+        return new PathSeg.Element(named.getName().getNs(), named.getName().getLocal(), brackets);
     }
 
     // ------------------------------------------------------------------ ensureNested
@@ -1209,7 +1269,7 @@ public final class CoreClassifier {
         TypeRef converterTypeRef = c.annotations().classValue(FQ_XML_CONVERTER, "cls");
         if (converterTypeRef == null) {
             sp.diagnostics().error(c.nativeHandle(),
-                    "@XmlConverter on '" + name + "' is missing a 'cls' value");
+                    XML_CONVERTER + ON + name + "' is missing a 'cls' value");
             return ConverterResult.ERROR;
         }
         ConverterInfo info = validateConverter(c, name, converterTypeRef, elemType);
@@ -1263,25 +1323,25 @@ public final class CoreClassifier {
         TypeSymbol converterType = sp.lookupType(converterFq);
         if (converterType == null) {
             sp.diagnostics().error(c.nativeHandle(),
-                    "@XmlConverter cls on '" + fieldName + "' could not be resolved: " + converterFq);
+                    XML_CONVERTER + " cls on '" + fieldName + "' could not be resolved: " + converterFq);
             return null;
         }
         if (!converterType.hasPublicNoArgConstructor()) {
             sp.diagnostics().error(c.nativeHandle(),
-                    "@XmlConverter on '" + fieldName + "': " + converterFq
+                    XML_CONVERTER + ON + fieldName + "': " + converterFq
                             + " must have a public no-arg constructor");
             return null;
         }
         TypeRef produces = converterType.typeArgumentOf(FQ_CONVERTER, 0);
         if (produces == null) {
             sp.diagnostics().error(c.nativeHandle(),
-                    "@XmlConverter on '" + fieldName + "': " + converterFq
+                    XML_CONVERTER + ON + fieldName + "': " + converterFq
                             + " does not implement " + FQ_CONVERTER + "<T>");
             return null;
         }
         if (!converterArgAssignable(produces, target)) {
             sp.diagnostics().error(c.nativeHandle(),
-                    "@XmlConverter on '" + fieldName + "': converter produces "
+                    XML_CONVERTER + ON + fieldName + "': converter produces "
                             + produces.qualifiedName()
                             + " which is not assignable to field type " + target.qualifiedName());
             return null;
@@ -1307,7 +1367,7 @@ public final class CoreClassifier {
             case INT, LONG, DOUBLE, BOOLEAN -> {
                 if (formatPattern != null) {
                     sp.diagnostics().error(owner.nativeHandle(),
-                            "@XmlFormat on '" + fieldName + "' is only supported for LocalDate, "
+                            XML_FORMAT_ON + fieldName + "' is only supported for LocalDate, "
                                     + "LocalDateTime, Instant, or BigDecimal");
                     yield null;
                 }
@@ -1356,7 +1416,7 @@ public final class CoreClassifier {
         if (p instanceof Predicate.Index idx) {
             if (onDescendantHead) {
                 sp.diagnostics().error(where.nativeHandle(),
-                        "@XmlChild path '" + path + "' for '" + fieldName
+                        XML_CHILD + PATH + path + FOR + fieldName
                                 + "': positional predicate [" + idx.getN() + "] is not supported on the descendant-axis segment ('//<name>[N]'). "
                                 + "Move the positional filter to a direct-axis segment (e.g. '//parent/item[" + idx.getN() + "]') or to @XmlRecord.");
                 return true;
@@ -1364,7 +1424,7 @@ public final class CoreClassifier {
         } else if (p instanceof Predicate.AttrEq ae) {
             if (PathParser.WILDCARD.equals(ae.getName().getNs())) {
                 sp.diagnostics().error(where.nativeHandle(),
-                        "@XmlChild path '" + path + "' for '" + fieldName
+                        XML_CHILD + PATH + path + FOR + fieldName
                                 + "': wildcard namespace in attribute predicate is not supported");
                 return true;
             }
@@ -1378,7 +1438,7 @@ public final class CoreClassifier {
             // users see the actionable rewrite hint rather than an internal stack trace.
             if (containsIndex(or.getL()) || containsIndex(or.getR())) {
                 sp.diagnostics().error(where.nativeHandle(),
-                        "@XmlChild path '" + path + "' for '" + fieldName
+                        XML_CHILD + PATH + path + FOR + fieldName
                                 + "': positional predicate inside 'or' is not supported. "
                                 + "Use chained brackets ('[@x=\"v\"][N]') or 'and' to combine filters.");
                 return true;
@@ -1409,19 +1469,41 @@ public final class CoreClassifier {
      * scope; (e) polymorphic tag/wrap names that clash with siblings.
      */
     private boolean validateChildPaths(RecordSymbol owner, String ownerFq, List<FieldSpec> fields) {
+        Set<QKey> directKeys = buildDirectTrie(fields, owner, ownerFq);
+        if (directKeys == null) return false;
+        Set<QKey> descendantHeads = collectDescendantHeads(fields, directKeys, owner, ownerFq);
+        if (descendantHeads == null) return false;
+        Set<QKey> seenMapEntries = validateMapEntries(fields, directKeys, descendantHeads, owner, ownerFq);
+        if (seenMapEntries == null) return false;
+        return validatePolyChildren(fields, directKeys, seenMapEntries, descendantHeads, owner, ownerFq);
+    }
+
+    /**
+     * Phase 1: build the direct (non-descendant) trie and collect head {@link QKey}s.
+     * Returns the direct-key set, or {@code null} if a bad path tail or trie conflict was reported.
+     */
+    private @Nullable Set<QKey> buildDirectTrie(List<FieldSpec> fields, RecordSymbol owner, String ownerFq) {
         TrieNode root = new TrieNode();
         Set<QKey> directKeys = new LinkedHashSet<>();
         for (FieldSpec f : fields) {
             if (!(f.source() instanceof Source.Child sc)) continue;
             if (sc.descendant()) continue;
-            if (!insertIntoTrie(root, sc.segments(), f, owner, ownerFq)) return false;
+            if (!insertIntoTrie(root, sc.segments(), f, owner, ownerFq)) return null;
             PathSeg first = sc.segments().get(0);
             if (first instanceof PathSeg.Element e) {
                 directKeys.add(new QKey(e.ns(), e.name()));
             }
         }
-        if (trieIsInvalid(root, owner, ownerFq)) return false;
+        if (trieIsInvalid(root, owner, ownerFq)) return null;
+        return directKeys;
+    }
 
+    /**
+     * Phase 2: collect descendant-axis heads and reject any head that also appears as a direct head.
+     * Returns the descendant-head set, or {@code null} on collision.
+     */
+    private @Nullable Set<QKey> collectDescendantHeads(List<FieldSpec> fields, Set<QKey> directKeys,
+                                                       RecordSymbol owner, String ownerFq) {
         Set<QKey> descendantHeads = new LinkedHashSet<>();
         for (FieldSpec f : fields) {
             if (!(f.source() instanceof Source.Child sc)) continue;
@@ -1434,38 +1516,56 @@ public final class CoreClassifier {
         for (QKey k : descendantHeads) {
             if (directKeys.contains(k)) {
                 sp.diagnostics().error(owner.nativeHandle(),
-                        ownerFq + ": @XmlChild('" + k.local()
-                                + "') and @XmlChild('//" + k.local()
+                        ownerFq + ": " + XML_CHILD + "('" + k.local()
+                                + "') and " + XML_CHILD + "('//" + k.local()
                                 + "') target the same head element '" + k.local() + "'; pick one");
-                return false;
+                return null;
             }
         }
+        return descendantHeads;
+    }
 
+    /**
+     * Phase 3: validate {@code @XmlMap} entries against direct heads, descendant heads, and prior
+     * map entries. Returns the seen-map-entry set, or {@code null} on the first conflict.
+     */
+    private @Nullable Set<QKey> validateMapEntries(List<FieldSpec> fields, Set<QKey> directKeys,
+                                                   Set<QKey> descendantHeads,
+                                                   RecordSymbol owner, String ownerFq) {
         Set<QKey> seenMapEntries = new LinkedHashSet<>();
         for (FieldSpec f : fields) {
             if (!(f.source() instanceof Source.MapEntry me)) continue;
             QKey k = new QKey(me.entryNs(), me.entryLocal());
             if (directKeys.contains(k)) {
                 sp.diagnostics().error(owner.nativeHandle(),
-                        ownerFq + ": @XmlMap entry '" + me.entryLocal()
-                                + "' on field '" + f.name() + "' clashes with another @XmlChild's first segment");
-                return false;
+                        ownerFq + ": " + XML_MAP + ENTRY + me.entryLocal()
+                                + ON_FIELD + f.name() + CLASHES_WITH_ANOTHER + XML_CHILD + "'s first segment");
+                return null;
             }
             if (descendantHeads.contains(k)) {
                 sp.diagnostics().error(owner.nativeHandle(),
-                        ownerFq + ": @XmlMap entry '" + me.entryLocal()
-                                + "' on field '" + f.name() + "' clashes with a descendant @XmlChild('//"
-                                + k.local() + "') head");
-                return false;
+                        ownerFq + ": " + XML_MAP + ENTRY + me.entryLocal()
+                                + ON_FIELD + f.name() + CLASHES_WITH_A_DESCENDANT_XML_CHILD
+                                + k.local() + HEAD);
+                return null;
             }
             if (!seenMapEntries.add(k)) {
                 sp.diagnostics().error(owner.nativeHandle(),
-                        ownerFq + ": duplicate @XmlMap entry '" + me.entryLocal()
-                                + "' on field '" + f.name() + "'");
-                return false;
+                        ownerFq + ": duplicate " + XML_MAP + ENTRY + me.entryLocal()
+                                + ON_FIELD + f.name() + "'");
+                return null;
             }
         }
+        return seenMapEntries;
+    }
 
+    /**
+     * Phase 4: validate polymorphic tag/wrap names against direct heads, map entries, prior poly keys,
+     * and descendant heads. Also rejects more than one tag-mode polymorphic field at the same scope.
+     */
+    private boolean validatePolyChildren(List<FieldSpec> fields, Set<QKey> directKeys,
+                                         Set<QKey> seenMapEntries, Set<QKey> descendantHeads,
+                                         RecordSymbol owner, String ownerFq) {
         Set<QKey> seenPolyKeys = new LinkedHashSet<>();
         boolean sawTagMode = false;
         for (FieldSpec f : fields) {
@@ -1475,48 +1575,54 @@ public final class CoreClassifier {
                 if (sawTagMode) {
                     sp.diagnostics().error(owner.nativeHandle(),
                             ownerFq
-                                    + ": more than one tag-mode polymorphic @XmlChild field at the same scope (field '"
+                                    + ": more than one tag-mode polymorphic " + XML_CHILD + " field at the same scope (field '"
                                     + f.name() + "')");
                     return false;
                 }
                 sawTagMode = true;
                 for (TagVariant v : tag.variants()) {
                     QKey k = new QKey(v.ns(), v.local());
-                    if (directKeys.contains(k) || seenMapEntries.contains(k) || !seenPolyKeys.add(k)) {
-                        sp.diagnostics().error(owner.nativeHandle(),
-                                ownerFq + ": polymorphic subtype tag '" + v.local()
-                                        + "' on field '" + f.name()
-                                        + "' clashes with another @XmlChild / @XmlMap / subtype");
-                        return false;
-                    }
-                    if (descendantHeads.contains(k)) {
-                        sp.diagnostics().error(owner.nativeHandle(),
-                                ownerFq + ": polymorphic subtype tag '" + v.local()
-                                        + "' on field '" + f.name() + "' clashes with a descendant @XmlChild('//"
-                                        + k.local() + "') head");
+                    if (polyKeysClash(k, f, "subtype",
+                            directKeys, seenMapEntries, seenPolyKeys, descendantHeads, owner, ownerFq)) {
                         return false;
                     }
                 }
             } else {
                 PolyDispatch.Attr ad = (PolyDispatch.Attr) d;
                 QKey k = new QKey(ad.wrapNs(), ad.wrapLocal());
-                if (directKeys.contains(k) || seenMapEntries.contains(k) || !seenPolyKeys.add(k)) {
-                    sp.diagnostics().error(owner.nativeHandle(),
-                            ownerFq + ": polymorphic wrap tag '" + ad.wrapLocal()
-                                    + "' on field '" + f.name()
-                                    + "' clashes with another @XmlChild / @XmlMap / subtype");
-                    return false;
-                }
-                if (descendantHeads.contains(k)) {
-                    sp.diagnostics().error(owner.nativeHandle(),
-                            ownerFq + ": polymorphic wrap tag '" + ad.wrapLocal()
-                                    + "' on field '" + f.name() + "' clashes with a descendant @XmlChild('//"
-                                    + k.local() + "') head");
+                if (polyKeysClash(k, f, "wrap",
+                        directKeys, seenMapEntries, seenPolyKeys, descendantHeads, owner, ownerFq)) {
                     return false;
                 }
             }
         }
         return true;
+    }
+
+    /**
+     * Reports a clash for one polymorphic key against direct heads, map entries, prior poly keys, or
+     * descendant heads. {@code polyKind} is the diagnostic label ({@code "subtype"} or {@code "wrap"}).
+     * Returns {@code true} when no clash was found and {@code k} was added to {@code seenPolyKeys}.
+     */
+    private boolean polyKeysClash(QKey k, FieldSpec f, String polyKind,
+                                  Set<QKey> directKeys, Set<QKey> seenMapEntries,
+                                  Set<QKey> seenPolyKeys, Set<QKey> descendantHeads,
+                                  RecordSymbol owner, String ownerFq) {
+        if (directKeys.contains(k) || seenMapEntries.contains(k) || !seenPolyKeys.add(k)) {
+            sp.diagnostics().error(owner.nativeHandle(),
+                    ownerFq + ": polymorphic " + polyKind + " tag '" + k.local()
+                            + ON_FIELD + f.name()
+                            + CLASHES_WITH_ANOTHER + XML_CHILD + " / " + XML_MAP + " / subtype");
+            return true;
+        }
+        if (descendantHeads.contains(k)) {
+            sp.diagnostics().error(owner.nativeHandle(),
+                    ownerFq + ": polymorphic " + polyKind + " tag '" + k.local()
+                            + ON_FIELD + f.name() + CLASHES_WITH_A_DESCENDANT_XML_CHILD
+                            + k.local() + HEAD);
+            return true;
+        }
+        return false;
     }
 
     /** Inserts a single field's segment chain into the trie. Returns {@code false} on bad-tail error. */

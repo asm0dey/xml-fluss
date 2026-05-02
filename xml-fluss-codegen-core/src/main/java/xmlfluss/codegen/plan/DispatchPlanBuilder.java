@@ -1,18 +1,8 @@
 package xmlfluss.codegen.plan;
 
-import xmlfluss.codegen.model.FieldSpec;
-import xmlfluss.codegen.model.NestedRegistry;
-import xmlfluss.codegen.model.PathSeg;
-import xmlfluss.codegen.model.QKey;
-import xmlfluss.codegen.model.RecordSpec;
-import xmlfluss.codegen.model.Source;
+import xmlfluss.codegen.model.*;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 
 /**
  * Builds a {@link DispatchPlan} for a {@link RecordSpec} (and every nested record in

@@ -1,24 +1,13 @@
 package xmlfluss.codegen.plan;
 
 import org.junit.jupiter.api.Test;
-import xmlfluss.codegen.model.Coerce;
-import xmlfluss.codegen.model.FieldSpec;
-import xmlfluss.codegen.model.NestedRegistry;
-import xmlfluss.codegen.model.PathSeg;
-import xmlfluss.codegen.model.QKey;
-import xmlfluss.codegen.model.RecordSpec;
-import xmlfluss.codegen.model.Source;
-import xmlfluss.codegen.model.TypeRef;
+import xmlfluss.codegen.model.*;
 import xmlfluss.path.Predicate;
 
 import java.util.List;
 import java.util.Map;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 final class DispatchPlanBuilderTest {
 
@@ -134,7 +123,6 @@ final class DispatchPlanBuilderTest {
     }
 
     private static FieldSpec mapField(String name, String entryLocal, FieldSpec keyF, FieldSpec valF) {
-        TypeRef str = TypeRef.of("java.lang", "String");
         TypeRef mapType = TypeRef.of("java.util", "Map");
         return new FieldSpec(name, false, false, mapType, mapType, mapType, "java.util.Map",
                 new Source.MapEntry(null, entryLocal), new Coerce.MapAggregate(),

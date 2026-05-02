@@ -7,12 +7,7 @@ import xmlfluss.codegen.spi.AnnotationView;
 import xmlfluss.codegen.spi.ComponentSymbol;
 import xmlfluss.codegen.spi.RecordSymbol;
 
-import javax.lang.model.element.AnnotationMirror;
-import javax.lang.model.element.Element;
-import javax.lang.model.element.ExecutableElement;
-import javax.lang.model.element.PackageElement;
-import javax.lang.model.element.RecordComponentElement;
-import javax.lang.model.element.TypeElement;
+import javax.lang.model.element.*;
 import javax.lang.model.type.DeclaredType;
 import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
@@ -65,11 +60,27 @@ public final class AptComponentSymbol implements ComponentSymbol {
         boolean primitive = declaredType.getKind().isPrimitive();
         if (primitive || isList()) return false;
 
-        // Explicit @NonNull wins: not nullable
+        VariableElement ctorParam = canonicalCtorParam();
+
+        // Explicit @NonNull wins: not nullable. Walk every surface APT can land it on —
+        // record-component element, its type-use, the accessor + return type, and the
+        // canonical-constructor parameter + its type-use. Mirrors KspComponentSymbol's
+        // hasExplicitAnnotation walk: a developer-written explicit canonical ctor
+        // `public R(@NonNull String x)` lands the annotation on the ctor parameter, and
+        // JLS 8.10.3 propagation to the component is not always honoured by APT impls —
+        // checking the parameter directly closes that gap.
         if (hasAnn(element, FQ_NON_NULL) || hasTypeUseAnn(declaredType, FQ_NON_NULL)) return false;
+        if (ctorParam != null
+                && (hasAnn(ctorParam, FQ_NON_NULL) || hasTypeUseAnn(ctorParam.asType(), FQ_NON_NULL))) {
+            return false;
+        }
 
         // Explicit @Nullable wins: nullable
         if (hasAnn(element, FQ_NULLABLE) || hasTypeUseAnn(declaredType, FQ_NULLABLE)) return true;
+        if (ctorParam != null
+                && (hasAnn(ctorParam, FQ_NULLABLE) || hasTypeUseAnn(ctorParam.asType(), FQ_NULLABLE))) {
+            return true;
+        }
 
         // Check accessor method (rc.getAccessor())
         ExecutableElement acc = element.getAccessor();
@@ -87,18 +98,45 @@ public final class AptComponentSymbol implements ComponentSymbol {
         //   NOTE: commit 6043dc1 ("port @XmlPolymorphic; restore @NullMarked nullability walk")
         //   originally chose the opposite default; reverted here in Task 9 wiring (5313784) for
         //   integration-suite parity. The walk machinery is intact; only the no-scope branch flipped.
-        //
-        // TODO: walk canonical-constructor parameter annotations too — KSP side (KspComponentSymbol)
-        //   already does this via the JSpecify type-use walk; APT side currently only inspects the
-        //   record-component element itself, missing @NonNull/@Nullable on the ctor parameter.
         TypeElement owner = element.getEnclosingElement() instanceof TypeElement te ? te : null;
         return !isNullMarkedScope(owner);
+    }
+
+    /**
+     * Returns the canonical-constructor parameter that corresponds to this record component, or
+     * {@code null} if no canonical constructor is visible (defensive — every record has one). The
+     * canonical ctor is the constructor whose parameter list (count + names, in order) matches the
+     * record components 1:1.
+     */
+    private @Nullable VariableElement canonicalCtorParam() {
+        Element enc = element.getEnclosingElement();
+        if (!(enc instanceof TypeElement owner)) return null;
+        var components = owner.getRecordComponents();
+        if (components.isEmpty()) return null;
+        String compName = element.getSimpleName().toString();
+        for (Element e : owner.getEnclosedElements()) {
+            if (e.getKind() != ElementKind.CONSTRUCTOR) continue;
+            ExecutableElement ctor = (ExecutableElement) e;
+            var params = ctor.getParameters();
+            if (params.size() != components.size()) continue;
+            boolean canonical = true;
+            for (int i = 0; i < components.size(); i++) {
+                if (!params.get(i).getSimpleName().contentEquals(components.get(i).getSimpleName())) {
+                    canonical = false;
+                    break;
+                }
+            }
+            if (!canonical) continue;
+            for (VariableElement p : params) {
+                if (p.getSimpleName().contentEquals(compName)) return p;
+            }
+        }
+        return null;
     }
 
     // ---- nullability helpers (mirrors Classifier.java computeNullable / isNullMarkedScope) ----
 
     private boolean hasAnn(Element e, String fq) {
-        if (e == null) return false;
         for (AnnotationMirror am : e.getAnnotationMirrors()) {
             if (annotationFq(am).equals(fq)) return true;
         }
@@ -106,7 +144,6 @@ public final class AptComponentSymbol implements ComponentSymbol {
     }
 
     private boolean hasTypeUseAnn(TypeMirror tm, String fq) {
-        if (tm == null) return false;
         for (AnnotationMirror am : tm.getAnnotationMirrors()) {
             if (annotationFq(am).equals(fq)) return true;
         }
@@ -149,15 +186,6 @@ public final class AptComponentSymbol implements ComponentSymbol {
     private boolean isNullMarkedScope(@Nullable TypeElement type) {
         Boolean s = nullScope(type);
         return s != null && s;
-    }
-
-    /**
-     * Returns {@code true} if explicitly inside a {@code @NullUnmarked} scope.
-     * Returns {@code false} for both NullMarked scope and "no scope" (no annotation found).
-     */
-    private boolean isNullUnmarkedScope(@Nullable TypeElement type) {
-        Boolean s = nullScope(type);
-        return s != null && !s;
     }
 
     @Override

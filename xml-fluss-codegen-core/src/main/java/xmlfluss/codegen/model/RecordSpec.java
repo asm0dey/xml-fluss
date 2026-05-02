@@ -2,11 +2,7 @@ package xmlfluss.codegen.model;
 
 import org.jspecify.annotations.Nullable;
 
-import java.util.Collections;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 
 /**
  * Full description of a record type to be emitted.

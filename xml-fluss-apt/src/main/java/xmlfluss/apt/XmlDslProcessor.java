@@ -2,6 +2,8 @@ package xmlfluss.apt;
 
 import xmlfluss.apt.spi.AptSymbolProvider;
 import xmlfluss.codegen.classify.CoreClassifier;
+import xmlfluss.codegen.model.NestedRegistry;
+import xmlfluss.codegen.model.RecordSpec;
 import xmlfluss.codegen.plan.DispatchPlan;
 import xmlfluss.codegen.plan.DispatchPlanBuilder;
 import xmlfluss.codegen.spi.RecordSymbol;
@@ -11,7 +13,6 @@ import javax.annotation.processing.RoundEnvironment;
 import javax.annotation.processing.SupportedAnnotationTypes;
 import javax.annotation.processing.SupportedSourceVersion;
 import javax.lang.model.SourceVersion;
-import javax.lang.model.element.Element;
 import javax.lang.model.element.TypeElement;
 import javax.tools.Diagnostic;
 import java.util.Set;
@@ -32,70 +33,68 @@ public final class XmlDslProcessor extends AbstractProcessor {
 
     @Override
     public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
-        if (annotations.isEmpty()) {
-            return false;
-        }
-        for (TypeElement anno : annotations) {
-            for (Element target : roundEnv.getElementsAnnotatedWith(anno)) {
-                if (!(target instanceof TypeElement typeElement)) {
-                    processingEnv.getMessager().printMessage(
-                            Diagnostic.Kind.ERROR,
-                            "xml-fluss-apt: @XmlRecord must annotate a record type",
-                            target);
-                    continue;
-                }
-                // Reject any @XmlRecord-annotated element that isn't a record (or a sealed @XmlPolymorphic
-                // parent). AptSymbolProvider returns null for those and would otherwise silently skip,
-                // hiding the configuration error from the user.
-                if (typeElement.getKind() != javax.lang.model.element.ElementKind.RECORD
-                        && !(typeElement.getModifiers()
-                                .contains(javax.lang.model.element.Modifier.SEALED))) {
-                    processingEnv.getMessager().printMessage(
-                            Diagnostic.Kind.ERROR,
-                            "@XmlRecord requires a record type, got " + typeElement.getKind(),
-                            typeElement);
-                    continue;
-                }
-                xmlfluss.codegen.model.RecordSpec spec;
-                xmlfluss.codegen.model.NestedRegistry registry;
-                DispatchPlan plan;
-                try {
-                    // Walk the record's components via the shared codegen-core classifier and consume the
-                    // neutral RecordSpec / NestedRegistry directly — the emitter is now language-neutral
-                    // at the model layer and renders JavaPoet types on demand via TypeRefs.
-                    AptSymbolProvider sp = new AptSymbolProvider(processingEnv);
-                    RecordSymbol symbol = sp.lookupRecord(typeElement.getQualifiedName().toString());
-                    if (symbol == null) {
-                        // Diagnostic already emitted (e.g. @XmlNs conflict in AptSymbolProvider).
-                        continue;
-                    }
-                    CoreClassifier core = new CoreClassifier(sp);
-                    spec = core.classify(symbol);
-                    if (spec == null) {
-                        // Validation diagnostics already emitted via sp.diagnostics(); skip this record.
-                        continue;
-                    }
-                    registry = core.registry();
-                    plan = DispatchPlanBuilder.build(spec, registry);
-                } catch (RuntimeException unexpected) {
-                    processingEnv.getMessager().printMessage(
-                            Diagnostic.Kind.ERROR,
-                            "xml-fluss-apt: internal error processing " + typeElement + ": " + unexpected,
-                            typeElement);
-                    continue;
-                }
-                try {
-                    // Code-generate `<Cls>Parser.java` from the RecordSpec — emits the Stream<T> parse(InputStream) entry point
-                    // plus per-field state machines for attr/child/text/map handling, and writes through the Filer.
-                    new Emitter(processingEnv).emit(spec, plan, registry);
-                } catch (RuntimeException unexpected) {
-                    processingEnv.getMessager().printMessage(
-                            Diagnostic.Kind.ERROR,
-                            "xml-fluss-apt: failed to emit parser for " + typeElement + ": " + unexpected,
-                            typeElement);
-                }
-            }
-        }
+        if (annotations.isEmpty()) return false;
+        annotations
+                .stream()
+                .flatMap(anno -> roundEnv.getElementsAnnotatedWith(anno).stream())
+                .forEach(target -> {
+                            if (!(target instanceof TypeElement typeElement)) {
+                                processingEnv.getMessager().printMessage(
+                                        Diagnostic.Kind.ERROR,
+                                        "xml-fluss-apt: @XmlRecord must annotate a record type",
+                                        target);
+                                return;
+                            }
+                            if (typeElement.getKind() != javax.lang.model.element.ElementKind.RECORD
+                                    && !(typeElement.getModifiers()
+                                    .contains(javax.lang.model.element.Modifier.SEALED))) {
+                                processingEnv.getMessager().printMessage(
+                                        Diagnostic.Kind.ERROR,
+                                        "@XmlRecord requires a record type, got " + typeElement.getKind(),
+                                        typeElement);
+                                return;
+                            }
+                            RecordSpec spec;
+                            NestedRegistry registry;
+                            DispatchPlan plan;
+                            try {
+                                // Walk the record's components via the shared codegen-core classifier and consume the
+                                // neutral RecordSpec / NestedRegistry directly — the emitter is now language-neutral
+                                // at the model layer and renders JavaPoet types on demand via TypeRefs.
+                                AptSymbolProvider sp = new AptSymbolProvider(processingEnv);
+                                RecordSymbol symbol = sp.lookupRecord(typeElement.getQualifiedName().toString());
+                                if (symbol == null) {
+                                    // Diagnostic already emitted (e.g. @XmlNs conflict in AptSymbolProvider).
+                                    return;
+                                }
+                                CoreClassifier core = new CoreClassifier(sp);
+                                spec = core.classify(symbol);
+                                if (spec == null) {
+                                    // Validation diagnostics already emitted via sp.diagnostics(); skip this record.
+                                    return;
+                                }
+                                registry = core.registry();
+                                plan = DispatchPlanBuilder.build(spec, registry);
+                            } catch (RuntimeException unexpected) {
+                                processingEnv.getMessager().printMessage(
+                                        Diagnostic.Kind.ERROR,
+                                        "xml-fluss-apt: internal error processing " + typeElement + ": " + unexpected,
+                                        typeElement);
+                                return;
+                            }
+                            try {
+                                // Code-generate `<Cls>Parser.java` from the RecordSpec — emits the Stream<T> parse(InputStream) entry point
+                                // plus per-field state machines for attr/child/text/map handling, and writes through the Filer.
+                                new Emitter(processingEnv).emit(spec, plan, registry);
+                            } catch (RuntimeException unexpected) {
+                                processingEnv.getMessager().printMessage(
+                                        Diagnostic.Kind.ERROR,
+                                        "xml-fluss-apt: failed to emit parser for " + typeElement + ": " + unexpected,
+                                        typeElement);
+                            }
+                        }
+
+                );
         return true;
     }
 }

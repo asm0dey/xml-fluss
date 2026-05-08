@@ -8,7 +8,7 @@ kotlin {
 }
 
 dependencies {
-    api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+    api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
     api("com.fasterxml:aalto-xml:1.3.4")
     api("org.jspecify:jspecify:1.0.0")
 

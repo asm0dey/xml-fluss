@@ -14,7 +14,7 @@ dependencies {
     implementation("com.squareup:kotlinpoet:2.3.0")
     implementation("com.squareup:kotlinpoet-ksp:2.3.0")
 
-    testImplementation("dev.zacsweers.kctfork:ksp:0.12.1")
+    testImplementation("dev.zacsweers.kctfork:ksp:0.13.0")
     testImplementation("org.junit.jupiter:junit-jupiter:6.0.3")
     testImplementation(kotlin("test-junit5"))
     testImplementation(project(":xml-fluss-runtime"))

@@ -12,7 +12,7 @@ dependencies {
     api("com.fasterxml:aalto-xml:1.3.4")
     api("org.jspecify:jspecify:1.0.0")
 
-    testImplementation("org.junit.jupiter:junit-jupiter:6.0.3")
+    testImplementation("org.junit.jupiter:junit-jupiter:6.1.3")
     testImplementation(kotlin("test-junit5"))
 }
 

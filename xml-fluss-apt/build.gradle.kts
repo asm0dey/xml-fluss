@@ -12,7 +12,7 @@ java {
 dependencies {
     api(project(":xml-fluss-runtime"))
     api(project(":xml-fluss-codegen-core"))
-    implementation("com.palantir.javapoet:javapoet:0.15.0")
+    implementation("com.palantir.javapoet:javapoet:0.19.0")
 
     testImplementation(platform("org.junit:junit-bom:6.0.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")

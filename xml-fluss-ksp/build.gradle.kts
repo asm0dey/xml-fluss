@@ -10,7 +10,7 @@ kotlin {
 dependencies {
     implementation(project(":xml-fluss-runtime"))
     implementation(project(":xml-fluss-codegen-core"))
-    implementation("com.google.devtools.ksp:symbol-processing-api:2.3.7")
+    implementation("com.google.devtools.ksp:symbol-processing-api:2.3.12")
     implementation("com.squareup:kotlinpoet:2.3.0")
     implementation("com.squareup:kotlinpoet-ksp:2.3.0")
 

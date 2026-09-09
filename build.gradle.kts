@@ -1,6 +1,6 @@
 plugins {
     kotlin("jvm") apply false
-    id("com.google.devtools.ksp") version "2.3.7" apply false
+    id("com.google.devtools.ksp") version "2.3.12" apply false
     id("org.jetbrains.dokka") apply false
     id("org.jetbrains.dokka-javadoc") apply false
     `jacoco-report-aggregation`
